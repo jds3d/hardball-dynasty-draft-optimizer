@@ -21,6 +21,16 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 DRAFT_POOL_URL = "https://www.whatifsports.com/hbd/Pages/GM/AmateurDraftPlayerPool.aspx"
 
+# Real column names for rating columns when the page gives no title/alt (icons only).
+# Keys are fallback names like "Rating_7" (7 = 1-based column index in the table).
+# Fill these in after a fetch: check the Excel for any "Rating_N" headers and map them here.
+# Hitting view: columns after Rnk, Player, Pos, B, T, Age (so first rating column is Rating_7).
+HITTER_RATING_DISPLAY_NAMES: dict[str, str] = {}
+# Fielding/General view: same idea; merge adds only columns not already in hitting row.
+FIELDING_RATING_DISPLAY_NAMES: dict[str, str] = {}
+# Pitching view: rating columns for pitchers.
+PITCHER_RATING_DISPLAY_NAMES: dict[str, str] = {}
+
 
 def _get_chrome_driver(headless: bool = False, user_data_dir: str | None = None) -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
@@ -38,15 +48,33 @@ def _wait(driver: webdriver.Chrome, timeout: float = 15) -> WebDriverWait:
     return WebDriverWait(driver, timeout)
 
 
+def _cell_header_label(cell) -> str:
+    """Get header label from cell: visible text, then title attribute, then img title/alt (for icon columns)."""
+    text = (cell.text or "").strip()
+    if text:
+        return text
+    title = (cell.get_attribute("title") or "").strip()
+    if title:
+        return title
+    try:
+        for img in cell.find_elements(By.TAG_NAME, "img"):
+            t = (img.get_attribute("title") or img.get_attribute("alt") or "").strip()
+            if t:
+                return t
+    except Exception:
+        pass
+    return ""
+
+
 def _get_first_row_headers(table) -> list[str]:
-    """Get header labels from the table's first row (th or td). If first row is empty (icons), try second."""
+    """Get header labels from the table's first row (th or td). Uses title/img alt when cell text is empty (icons)."""
     try:
         all_tr = table.find_elements(By.TAG_NAME, "tr")
         for tr in all_tr[:2]:  # first or second row
             cells = tr.find_elements(By.TAG_NAME, "th")
             if not cells:
                 cells = tr.find_elements(By.TAG_NAME, "td")
-            labels = [c.text.strip() if c.text else "" for c in cells]
+            labels = [_cell_header_label(c) for c in cells]
             # Use this row if it has Rnk/Rank and Player
             if any("rank" in (l or "").lower() or l in ("Rnk", "Rank") for l in labels):
                 if any("player" in (l or "").lower() for l in labels):
@@ -54,7 +82,7 @@ def _get_first_row_headers(table) -> list[str]:
         # Fallback: return first row's labels anyway
         if all_tr:
             cells = all_tr[0].find_elements(By.TAG_NAME, "th") or all_tr[0].find_elements(By.TAG_NAME, "td")
-            return [c.text.strip() if c.text else "" for c in cells]
+            return [_cell_header_label(c) for c in cells]
     except Exception:
         pass
     return []
@@ -80,7 +108,12 @@ def _find_draft_table(driver: webdriver.Chrome):
     return None
 
 
-def _table_to_rows(driver: webdriver.Chrome, table_selector: str = "table#dgPlayers") -> list[dict[str, Any]]:
+def _table_to_rows(
+    driver: webdriver.Chrome,
+    table_selector: str = "table#dgPlayers",
+    rating_display_names: dict[str, str] | None = None,
+    key_prefix: str = "Rating",
+) -> list[dict[str, Any]]:
     """Parse the draft prospects table into a list of dicts (header -> cell text)."""
     rows: list[dict[str, Any]] = []
     table = _find_draft_table(driver)
@@ -103,6 +136,19 @@ def _table_to_rows(driver: webdriver.Chrome, table_selector: str = "table#dgPlay
     # All rows except the first are data (in case there's no tbody/thead, or header is in tbody)
     all_rows = table.find_elements(By.TAG_NAME, "tr")
     body_rows = all_rows[1:] if len(all_rows) > 1 else []
+    # If the site uses a two-row header (text in row 1, icons in row 2), we only got 6 labels.
+    # Pad to the data row's column count so we scrape every column (Rating_7, Rating_8, ...).
+    for tr in body_rows:
+        cells = tr.find_elements(By.TAG_NAME, "td")
+        if len(cells) < len(header_cells):
+            continue
+        first_text = (cells[0].text.strip() if cells else "").lower()
+        second_text = (cells[1].text.strip() if len(cells) > 1 else "").lower()
+        if first_text in ("rnk", "rank") or second_text == "player":
+            continue
+        if len(cells) > len(header_cells):
+            header_cells = list(header_cells) + [""] * (len(cells) - len(header_cells))
+        break
     for tr in body_rows:
         cells = tr.find_elements(By.TAG_NAME, "td")
         if len(cells) < len(header_cells):
@@ -114,13 +160,27 @@ def _table_to_rows(driver: webdriver.Chrome, table_selector: str = "table#dgPlay
             continue
         row = {}
         for i, h in enumerate(header_cells):
-            if i < len(cells) and h:
-                raw = cells[i].text.strip()
-                row[h] = _parse_cell(raw)
+            if i >= len(cells):
+                continue
+            raw = cells[i].text.strip()
+            parsed = _parse_cell(raw)
+            positional_key = f"{key_prefix}_{i + 1}"
+            row[positional_key] = parsed
+            # Also store under the header-derived name if we have one
+            name_key = (h or "").strip()
+            if name_key and name_key != positional_key:
+                row[name_key] = parsed
+            # Apply display name overrides
+            if rating_display_names and positional_key in rating_display_names:
+                row[rating_display_names[positional_key]] = parsed
         # Skip rows with no player name (e.g. second header row with icons)
         if not row or (not row.get("Player") and not row.get("Player Name")):
             continue
+        if not rows:
+            log.info("First scraped row keys: %s", list(row.keys()))
+            log.info("First scraped row values: %s", row)
         rows.append(row)
+    log.info("Header labels from page: %s", header_cells)
     return rows
 
 
@@ -278,7 +338,7 @@ def fetch_draft_pool_data(
             if _find_draft_table(driver):
                 break
             time.sleep(0.5)
-        hitting_view_rows = _table_to_rows(driver)
+        hitting_view_rows = _table_to_rows(driver, rating_display_names=HITTER_RATING_DISPLAY_NAMES)
     except Exception as e:
         log.warning("Fetch: Could not parse hitting table: %s", e)
         hitting_view_rows = []
@@ -295,7 +355,7 @@ def fetch_draft_pool_data(
             if _find_draft_table(driver):
                 break
             time.sleep(0.5)
-        fielding_view_rows = _table_to_rows(driver)
+        fielding_view_rows = _table_to_rows(driver, rating_display_names=FIELDING_RATING_DISPLAY_NAMES, key_prefix="Fielding")
     except Exception as e:
         log.warning("Fetch: Could not parse fielding table: %s", e)
         fielding_view_rows = []
@@ -325,7 +385,7 @@ def fetch_draft_pool_data(
             if _find_draft_table(driver):
                 break
             time.sleep(0.5)
-        pitching_rows = _table_to_rows(driver)
+        pitching_rows = _table_to_rows(driver, rating_display_names=PITCHER_RATING_DISPLAY_NAMES)
     except Exception as e:
         log.warning("Fetch: Could not parse pitching table: %s", e)
         pitching_rows = []
