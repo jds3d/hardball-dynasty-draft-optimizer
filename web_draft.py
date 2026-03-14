@@ -187,22 +187,40 @@ def _table_to_rows(
 def get_season_from_page(driver: webdriver.Chrome) -> int | None:
     """
     Parse the current season number from the page (e.g. 'Strawberry-Gooden (30) - Scottsdale' -> 30).
+    Tries visible text first, then individual elements, then raw page source HTML.
     Returns None if not found.
     """
+    # Strategy 1: visible body text
     try:
-        # Look for pattern (NN) in visible text (team/league dropdown area)
         body = driver.find_element(By.TAG_NAME, "body")
         text = body.text or ""
-        match = re.search(r"\((\d+)\)", text)
-        if match:
+        match = re.search(r"\((\d{1,3})\)", text)
+        if match and 1 <= int(match.group(1)) <= 999:
             return int(match.group(1))
     except Exception:
         pass
+    # Strategy 2: individual elements with parenthesized numbers
     try:
         for el in driver.find_elements(By.XPATH, "//*[contains(text(),'(') and contains(text(),')')]"):
             t = (el.text or "").strip()
-            m = re.search(r"\((\d+)\)", t)
+            m = re.search(r"\((\d{1,3})\)", t)
             if m and 1 <= int(m.group(1)) <= 999:
+                return int(m.group(1))
+    except Exception:
+        pass
+    # Strategy 3: raw page source (works in headless when visible text is incomplete)
+    try:
+        source = driver.page_source or ""
+        # Look for team/league pattern like "TeamName (30) - CityName"
+        m = re.search(r'[A-Z][a-zA-Z\-]+\s+\((\d{1,3})\)\s*-\s*[A-Z]', source)
+        if m and 1 <= int(m.group(1)) <= 999:
+            log.info("Season found in page source: %s", m.group(1))
+            return int(m.group(1))
+        # Broader: any (NN) in source that's near "Season" or league context
+        for pattern in [r'Season\s+(\d{1,3})', r'\((\d{1,3})\)']:
+            m = re.search(pattern, source)
+            if m and 1 <= int(m.group(1)) <= 999:
+                log.info("Season found in page source (broad): %s", m.group(1))
                 return int(m.group(1))
     except Exception:
         pass
@@ -234,11 +252,9 @@ def _click_go(driver: webdriver.Chrome) -> bool:
                         continue
                     val = (el.get_attribute("value") or "").strip()
                     txt = (el.text or "").strip()
-                    # Must look like GO (exact or case variation)
                     if val.upper() == "GO" or txt.upper() == "GO":
                         el.click()
                         log.info("Clicked GO button.")
-                        time.sleep(1)
                         return True
                 except Exception:
                     continue
@@ -258,12 +274,52 @@ def _click_go(driver: webdriver.Chrome) -> bool:
                 if btn.is_displayed() and btn.is_enabled():
                     btn.click()
                     log.info("Clicked GO button.")
-                    time.sleep(1)
                     return True
         except Exception:
             continue
     log.warning("GO button not found; continuing without applying filters.")
     return False
+
+
+def _go_and_wait_for_table(driver: webdriver.Chrome, expected_view: str = "", timeout: float = 20) -> None:
+    """
+    Click GO and wait for the ASP.NET postback to complete and a fresh draft table to appear.
+    Uses staleness_of on the old table to detect postback, then waits for a new table.
+    """
+    old_table = _find_draft_table(driver)
+    old_table_stale = False
+
+    clicked = _click_go(driver)
+    if not clicked:
+        log.warning("GO not clicked; attempting JavaScript form submit as fallback...")
+        try:
+            driver.execute_script("__doPostBack('', '');")
+        except Exception:
+            pass
+
+    if old_table:
+        try:
+            WebDriverWait(driver, timeout).until(EC.staleness_of(old_table))
+            old_table_stale = True
+            log.info("Old table went stale (postback completed for %s view).", expected_view)
+        except Exception:
+            log.info("Old table did not go stale within %ss for %s view.", timeout, expected_view)
+
+    # Poll for the new draft table to appear
+    for attempt in range(20):
+        table = _find_draft_table(driver)
+        if table:
+            if old_table_stale or (table is not old_table) or old_table is None:
+                log.info("Draft table ready for %s view after %s polls.", expected_view, attempt + 1)
+                time.sleep(0.5)
+                return
+        time.sleep(1)
+
+    # Last resort: table may exist even if we couldn't confirm it refreshed
+    if _find_draft_table(driver):
+        log.warning("Using existing table for %s view (could not confirm postback).", expected_view)
+    else:
+        log.warning("No draft table found for %s view after polling.", expected_view)
 
 
 def _set_dropdown(driver: webdriver.Chrome, option_text: str, select_hints: list[str]) -> bool:
@@ -301,10 +357,10 @@ def _norm_name(name: str) -> str:
 def fetch_draft_pool_data(
     driver: webdriver.Chrome,
     top_n: int = 500,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Fetch draft pool: hitters get both Hitting and Fielding/General views merged; pitchers get Pitching view.
-    Returns (hitters_rows, pitchers_rows). Hitters = non-P with hitting + fielding columns, Pitchers = P.
+    Returns (hitters_rows, pitchers_rows, background_rows).
     """
     log.info("Fetch: Loading draft pool URL...")
     driver.get(DRAFT_POOL_URL)
@@ -331,13 +387,8 @@ def fetch_draft_pool_data(
     _set_dropdown(driver, f"Top {top_n}", ["Top", "ddlTop", "Show"])
     log.info("Fetch: Setting View to Projected Hitting Ratings, clicking GO...")
     _set_dropdown(driver, "Projected Hitting Ratings", ["View", "ddlView"])
-    _click_go(driver)
-    time.sleep(1.2)
+    _go_and_wait_for_table(driver, "Hitting")
     try:
-        for _ in range(5):
-            if _find_draft_table(driver):
-                break
-            time.sleep(0.5)
         hitting_view_rows = _table_to_rows(driver, rating_display_names=HITTER_RATING_DISPLAY_NAMES)
     except Exception as e:
         log.warning("Fetch: Could not parse hitting table: %s", e)
@@ -348,13 +399,8 @@ def fetch_draft_pool_data(
     # --- Fielding/General view (merge with hitting for hitters) ---
     log.info("Fetch: Setting View to Projected Fielding/General Ratings, clicking GO...")
     _set_dropdown(driver, "Projected Fielding/General Ratings", ["View", "ddlView"])
-    _click_go(driver)
-    time.sleep(1.2)
+    _go_and_wait_for_table(driver, "Fielding")
     try:
-        for _ in range(5):
-            if _find_draft_table(driver):
-                break
-            time.sleep(0.5)
         fielding_view_rows = _table_to_rows(driver, rating_display_names=FIELDING_RATING_DISPLAY_NAMES, key_prefix="Fielding")
     except Exception as e:
         log.warning("Fetch: Could not parse fielding table: %s", e)
@@ -378,13 +424,8 @@ def fetch_draft_pool_data(
     # --- Pitching view ---
     log.info("Fetch: Setting View to Projected Pitching Ratings (pitchers), clicking GO...")
     _set_dropdown(driver, "Projected Pitching Ratings", ["View", "ddlView"])
-    _click_go(driver)
-    time.sleep(1.2)
+    _go_and_wait_for_table(driver, "Pitching")
     try:
-        for _ in range(5):
-            if _find_draft_table(driver):
-                break
-            time.sleep(0.5)
         pitching_rows = _table_to_rows(driver, rating_display_names=PITCHER_RATING_DISPLAY_NAMES)
     except Exception as e:
         log.warning("Fetch: Could not parse pitching table: %s", e)
@@ -392,11 +433,38 @@ def fetch_draft_pool_data(
     pitching_rows = [norm(r) for r in pitching_rows]
     log.info("Fetch: Parsed %s pitching view rows.", len(pitching_rows))
 
+    # --- Background Info view (signability, school, class) ---
+    log.info("Fetch: Setting View to Background Info, clicking GO...")
+    _set_dropdown(driver, "Background Info", ["View", "ddlView"])
+    _go_and_wait_for_table(driver, "Background")
+    try:
+        background_rows = _table_to_rows(driver, key_prefix="BG")
+    except Exception as e:
+        log.warning("Fetch: Could not parse background info table: %s", e)
+        background_rows = []
+    background_rows = [norm(r) for r in background_rows]
+    log.info("Fetch: Parsed %s background info rows.", len(background_rows))
+
+    # Merge signability + class into hitter/pitcher rows by player name
+    bg_by_name = {_norm_name(_player_name(r)): r for r in background_rows}
+    for row in merged_hitter_view:
+        bg = bg_by_name.get(_norm_name(_player_name(row)), {})
+        row["Signability"] = bg.get("Signability", "")
+        row["Class"] = bg.get("Class", "")
+        row["School"] = bg.get("School", "")
+        row["Hometown"] = bg.get("Hometown", "")
+    for row in pitching_rows:
+        bg = bg_by_name.get(_norm_name(_player_name(row)), {})
+        row["Signability"] = bg.get("Signability", "")
+        row["Class"] = bg.get("Class", "")
+        row["School"] = bg.get("School", "")
+        row["Hometown"] = bg.get("Hometown", "")
+
     # Split by position: Hitters = non-P from merged view, Pitchers = P from pitching view
     hitters = [r for r in merged_hitter_view if _pos(r) != "P"]
     pitchers = [r for r in pitching_rows if _pos(r) == "P"]
     log.info("Fetch: Split into %s hitters and %s pitchers.", len(hitters), len(pitchers))
-    return hitters, pitchers
+    return hitters, pitchers, background_rows
 
 
 def _pos(row: dict) -> str:
@@ -726,17 +794,18 @@ def run_sync_from_web_to_excel(
     driver = _get_chrome_driver(headless=headless, user_data_dir=user_data_dir)
     try:
         _wait_for_login(driver)
-        log.info("Fetch: Getting draft pool data...")
-        hitters, pitchers = fetch_draft_pool_data(driver, top_n=top_n)
-        log.info("Fetch: Reading season from page...")
+        log.info("Fetch: Reading season from page (before view switches)...")
         season = get_season_from_page(driver)
+        log.info("Fetch: Season detected: %s", season)
+        log.info("Fetch: Getting draft pool data...")
+        hitters, pitchers, background = fetch_draft_pool_data(driver, top_n=top_n)
         out_dir = Path(output_dir or "outputs")
         out_dir.mkdir(parents=True, exist_ok=True)
         season_label = str(season) if season is not None else "unknown"
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         output_path = out_dir / f"Season {season_label} amateur draft {timestamp}.xlsx"
         log.info("Fetch: Writing to %s...", output_path)
-        write_draft_data_to_excel(excel_path, hitters, pitchers, output_path=output_path)
+        write_draft_data_to_excel(excel_path, hitters, pitchers, background_rows=background, output_path=output_path)
         log.info("Fetch: Done. Wrote %s hitters and %s pitchers to %s", len(hitters), len(pitchers), output_path)
         print(f"Wrote {len(hitters)} hitters and {len(pitchers)} pitchers to {output_path}")
     finally:

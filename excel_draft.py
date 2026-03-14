@@ -267,6 +267,89 @@ def _write_hitters_sheet_fixed(
 
 MASTER_LIST_SHEET = "Master List"
 
+# Scouting trust factor parameters.
+# trust = MIN_TRUST + (1 - MIN_TRUST) * (budget / max_budget) ^ CURVE
+# CURVE calibrated so that half-max budget ≈ 10% penalty.
+# MIN_TRUST = floor at $0 scouting (90% discount → players are very undesirable).
+_SCOUTING_MAX_BUDGET = 20.0
+_SCOUTING_MIN_TRUST = 0.10
+_SCOUTING_CURVE = 0.17
+
+
+def _raw_scouting_trust(budget: float) -> float:
+    """Raw trust value before normalization. Used internally."""
+    ratio = max(0.0, min(1.0, budget / _SCOUTING_MAX_BUDGET))
+    if ratio == 0:
+        return _SCOUTING_MIN_TRUST
+    return _SCOUTING_MIN_TRUST + (1 - _SCOUTING_MIN_TRUST) * (ratio ** _SCOUTING_CURVE)
+
+
+def _classify_player(age: Any, player_class: str = "") -> str:
+    """
+    Classify a player as 'college' or 'high_school'.
+    Uses Class field first (FR/SO/JR/SR = college, -- = HS), then falls back to age (19+ = college).
+    """
+    pc = str(player_class or "").strip().upper()
+    if pc in ("FR", "SO", "JR", "SR"):
+        return "college"
+    if pc == "--":
+        return "high_school"
+    try:
+        a = int(age)
+    except (TypeError, ValueError):
+        return "high_school"
+    if a >= 19:
+        return "college"
+    return "high_school"
+
+
+def _signability_factor(text: str, raw_overall: float = 0) -> float:
+    """
+    Return a multiplier (0–1) based on signability text from the Background Info view.
+    "First round" / "first five rounds" penalties only apply if the player isn't good enough
+    to actually go in that range (i.e. they'd leave for college instead of signing).
+    "Probably won't sign" and "Unknown" are near-zero to avoid drafting them.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return 1.0
+    if "will sign for slot" in t or "looking to sign" in t:
+        return 1.0
+    if "drafted in the first round" in t:
+        return 1.0 if raw_overall >= 70 else 0.90
+    if "drafted in the first five" in t:
+        return 1.0 if raw_overall >= 60 else 0.80
+    if "may sign if the deal is right" in t:
+        return 0.60
+    if "undecided" in t:
+        return 0.40
+    if "probably won't sign" in t:
+        return 0.05
+    if "unknown" in t or "wasn't scouted" in t:
+        return 0.05
+    return 0.50
+
+
+BACKGROUND_SHEET = "Background Info"
+BACKGROUND_HEADERS = ["Rnk", "Player", "Pos", "B", "T", "Age", "Hometown", "School", "Class", "Signability"]
+
+
+def _write_background_sheet(
+    wb: openpyxl.Workbook,
+    background_rows: list[dict[str, Any]],
+) -> None:
+    """Write a Background Info tab with all players' background data."""
+    if BACKGROUND_SHEET in wb.sheetnames:
+        del wb[BACKGROUND_SHEET]
+    ws = wb.create_sheet(BACKGROUND_SHEET)
+    for col_idx, header in enumerate(BACKGROUND_HEADERS, start=1):
+        ws.cell(1, col_idx, header)
+    for i, row in enumerate(background_rows):
+        for col_idx, header in enumerate(BACKGROUND_HEADERS, start=1):
+            val = row.get(header)
+            if val is not None:
+                ws.cell(i + 2, col_idx, val)
+
 
 def _write_master_list(
     wb: openpyxl.Workbook,
@@ -274,55 +357,99 @@ def _write_master_list(
     pitchers_rows: list[dict[str, Any]],
 ) -> None:
     """
-    Create a Master List tab with all players (hitters + pitchers) sorted by raw Overall rating.
-    Column A has a formula pointing to the source sheet's column A (the template's projection formula),
-    so the real projection value appears when the file is opened in Excel.
+    Create a Master List tab with all players (hitters + pitchers).
+    Applies scouting trust penalty (college vs HS budget) AND signability penalty.
+    Sorted by final adjusted score descending.
     """
+    from credentials import get_scouting_config
+
+    scouting = get_scouting_config()
+    raw_trusts = {
+        "college": _raw_scouting_trust(scouting["college"]),
+        "high_school": _raw_scouting_trust(scouting["high_school"]),
+    }
+    best = max(raw_trusts.values())
+    trust_factors = {k: v / best for k, v in raw_trusts.items()}
+
     if MASTER_LIST_SHEET in wb.sheetnames:
         del wb[MASTER_LIST_SHEET]
     ws = wb.create_sheet(MASTER_LIST_SHEET)
 
-    players: list[tuple[float, str, str, str, str, int]] = []
+    players: list[dict[str, Any]] = []
+
     for i, row in enumerate(hitters_rows):
-        excel_row = HITTERS_HEADER_ROW + 1 + i
-        name = _row_value_for_keys(row, ["Rating_2", "Player", "Player Name"])
-        pos = _row_value_for_keys(row, ["Rating_3", "Pos", "Position"])
-        overall = _row_value_for_keys(row, ["Rating_15"]) or 0
-        players.append((_parse_score(overall), str(name or ""), str(pos or ""), "Hitter", HITTERS_SHEET, excel_row))
+        src_row = HITTERS_HEADER_ROW + 1 + i
+        name = str(_row_value_for_keys(row, ["Rating_2", "Player", "Player Name"]) or "")
+        pos = str(_row_value_for_keys(row, ["Rating_3", "Pos", "Position"]) or "")
+        age = _row_value_for_keys(row, ["Rating_6", "Age"])
+        player_class = str(row.get("Class", "") or "")
+        signability = str(row.get("Signability", "") or "")
+        raw = _parse_score(_row_value_for_keys(row, ["Rating_15"]) or 0)
+        category = _classify_player(age, player_class)
+        scout_trust = trust_factors[category]
+        sign_factor = _signability_factor(signability, raw)
+        players.append({
+            "adjusted": raw * scout_trust * sign_factor,
+            "raw": raw, "scout": scout_trust, "sign": sign_factor,
+            "name": name, "pos": pos, "type": "Hitter", "cat": category,
+            "sig": signability, "sheet": HITTERS_SHEET, "src_row": src_row,
+        })
 
     for i, row in enumerate(pitchers_rows):
-        excel_row = PITCHERS_HEADER_ROW + 1 + i
-        name = _row_value_for_keys(row, ["Rating_2", "Player", "Player Name"])
-        pos = _row_value_for_keys(row, ["Rating_3", "Pos", "Position"])
-        overall = _row_value_for_keys(row, ["Rating_19"]) or 0
-        players.append((_parse_score(overall), str(name or ""), str(pos or ""), "Pitcher", PITCHERS_SHEET, excel_row))
+        src_row = PITCHERS_HEADER_ROW + 1 + i
+        name = str(_row_value_for_keys(row, ["Rating_2", "Player", "Player Name"]) or "")
+        pos = str(_row_value_for_keys(row, ["Rating_3", "Pos", "Position"]) or "")
+        age = _row_value_for_keys(row, ["Rating_6", "Age"])
+        player_class = str(row.get("Class", "") or "")
+        signability = str(row.get("Signability", "") or "")
+        raw = _parse_score(_row_value_for_keys(row, ["Rating_19"]) or 0)
+        category = _classify_player(age, player_class)
+        scout_trust = trust_factors[category]
+        sign_factor = _signability_factor(signability, raw)
+        players.append({
+            "adjusted": raw * scout_trust * sign_factor,
+            "raw": raw, "scout": scout_trust, "sign": sign_factor,
+            "name": name, "pos": pos, "type": "Pitcher", "cat": category,
+            "sig": signability, "sheet": PITCHERS_SHEET, "src_row": src_row,
+        })
 
-    players.sort(key=lambda x: (-x[0], x[1]))
+    players.sort(key=lambda p: (-p["adjusted"], p["name"]))
 
-    ws.cell(1, 1, "Overall Projection")
-    ws.cell(1, 2, "Player")
-    ws.cell(1, 3, "Pos")
-    ws.cell(1, 4, "Type")
+    headers = [
+        "Adjusted Score", "Overall Projection", "Raw Overall",
+        "Scouting Trust", "Signability Factor",
+        "Player", "Pos", "Type", "Category", "Signability",
+    ]
+    for col_idx, h in enumerate(headers, start=1):
+        ws.cell(1, col_idx, h)
 
-    for i, (_, name, pos, ptype, src_sheet, src_row) in enumerate(players):
-        out_row = i + 2
-        ws.cell(out_row, 1, f"='{src_sheet}'!A{src_row}")
-        ws.cell(out_row, 2, name)
-        ws.cell(out_row, 3, pos)
-        ws.cell(out_row, 4, ptype)
+    for i, p in enumerate(players):
+        r = i + 2
+        ws.cell(r, 1, round(p["adjusted"], 2))
+        ws.cell(r, 2, f"='{p['sheet']}'!A{p['src_row']}")
+        ws.cell(r, 3, p["raw"])
+        ws.cell(r, 4, round(p["scout"], 3))
+        ws.cell(r, 5, round(p["sign"], 2))
+        ws.cell(r, 6, p["name"])
+        ws.cell(r, 7, p["pos"])
+        ws.cell(r, 8, p["type"])
+        ws.cell(r, 9, p["cat"])
+        ws.cell(r, 10, p["sig"])
 
 
 def write_draft_data_to_excel(
     path: str | Path,
     hitters_rows: list[dict[str, Any]],
     pitchers_rows: list[dict[str, Any]],
+    background_rows: list[dict[str, Any]] | None = None,
     output_path: str | Path | None = None,
 ) -> None:
     """
     Write scraped draft pool data into the Excel file.
     Hitters sheet: fixed layout (hitting block B–P, fielding block Q+).
     Pitchers sheet: fixed layout (single block B–T).
-    If output_path is set, saves to that path instead of path (useful for saving to ./outputs/).
+    Background Info tab: all players' background data (signability, school, class).
+    Master List tab: all players sorted by adjusted score (scouting + signability penalties).
     """
     path = Path(path)
     wb = openpyxl.load_workbook(path)
@@ -331,8 +458,8 @@ def write_draft_data_to_excel(
     if HITTERS_SHEET in wb.sheetnames and hitters_rows:
         _write_hitters_sheet_fixed(wb[HITTERS_SHEET], HITTERS_HEADER_ROW, hitters_rows)
 
-    # Pitchers: fixed column layout
-    if PITCHERS_SHEET in wb.sheetnames and pitchers_rows:
+    # Pitchers: always write headers; write data if we have rows
+    if PITCHERS_SHEET in wb.sheetnames:
         ws = wb[PITCHERS_SHEET]
         for col_idx, header_label, keys in PITCHERS_LAYOUT:
             ws.cell(PITCHERS_HEADER_ROW, col_idx, header_label)
@@ -341,9 +468,11 @@ def write_draft_data_to_excel(
                 if val is not None:
                     ws.cell(PITCHERS_HEADER_ROW + 1 + i, col_idx, val)
 
-    # Master List: all players combined, sorted by raw Overall rating.
-    # Column A uses a formula referencing each player's source sheet column A,
-    # so when opened in Excel the real projection value appears and the user can re-sort.
+    # Background Info tab
+    if background_rows:
+        _write_background_sheet(wb, background_rows)
+
+    # Master List: all players sorted by adjusted score (scouting trust × signability factor)
     _write_master_list(wb, hitters_rows, pitchers_rows)
 
     save_to = Path(output_path) if output_path else path

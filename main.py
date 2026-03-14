@@ -89,12 +89,15 @@ def main() -> None:
         sys.exit(1)
 
     from web_draft import run_sync_from_web_to_excel, run_apply_excel_order_to_web
+    from credentials import get_headless
+
+    headless = getattr(args, "headless", False) or get_headless()
 
     if args.command == "fetch":
         profile = str(args.chrome_profile) if getattr(args, "chrome_profile") and args.chrome_profile else None
         run_sync_from_web_to_excel(
             str(excel_path),
-            headless=getattr(args, "headless", False),
+            headless=headless,
             user_data_dir=profile,
             top_n=getattr(args, "top", 500),
             output_dir=str(args.output_dir) if getattr(args, "output_dir", None) else "outputs",
@@ -103,7 +106,7 @@ def main() -> None:
         profile = str(args.chrome_profile) if getattr(args, "chrome_profile") and args.chrome_profile else None
         run_apply_excel_order_to_web(
             str(excel_path),
-            headless=getattr(args, "headless", False),
+            headless=headless,
             user_data_dir=profile,
         )
     else:
