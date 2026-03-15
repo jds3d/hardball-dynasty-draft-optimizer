@@ -426,19 +426,15 @@ MASTER_LIST_SHEET = "Master List"
 
 # Scouting trust factor parameters.
 # trust = MIN_TRUST + (1 - MIN_TRUST) * (budget / max_budget) ^ CURVE
-# CURVE calibrated so that half-max budget ≈ 10% penalty.
-# MIN_TRUST = floor at $0 scouting (90% discount → players are very undesirable).
-_SCOUTING_MAX_BUDGET = 20.0
-_SCOUTING_MIN_TRUST = 0.10
-_SCOUTING_CURVE = 0.17
+_SCOUTING_MAX_BUDGET = 20.0  # HBD's fixed max scouting budget ($M)
 
 
-def _raw_scouting_trust(budget: float) -> float:
+def _raw_scouting_trust(budget: float, min_trust: float, curve: float) -> float:
     """Raw trust value before normalization. Used internally."""
     ratio = max(0.0, min(1.0, budget / _SCOUTING_MAX_BUDGET))
     if ratio == 0:
-        return _SCOUTING_MIN_TRUST
-    return _SCOUTING_MIN_TRUST + (1 - _SCOUTING_MIN_TRUST) * (ratio ** _SCOUTING_CURVE)
+        return min_trust
+    return min_trust + (1 - min_trust) * (ratio ** curve)
 
 
 def _classify_player(age: Any, player_class: str = "") -> str:
@@ -460,31 +456,36 @@ def _classify_player(age: Any, player_class: str = "") -> str:
     return "high_school"
 
 
-def _signability_factor(text: str, raw_overall: float = 0) -> float:
+def _signability_factor(text: str, raw_overall: float = 0, cfg: dict[str, float] | None = None) -> float:
     """
     Return a multiplier (0–1) based on signability text from the Background Info view.
     "First round" / "first five rounds" penalties only apply if the player isn't good enough
     to actually go in that range (i.e. they'd leave for college instead of signing).
     "Probably won't sign" and "Unknown" are near-zero to avoid drafting them.
+    All penalty values are configurable via credentials.env (SIGN_* keys).
     """
+    if cfg is None:
+        from credentials import get_signability_config
+        cfg = get_signability_config()
+
     t = (text or "").strip().lower()
     if not t:
         return 1.0
     if "will sign for slot" in t or "looking to sign" in t:
-        return 1.0
+        return cfg["will_sign"]
     if "drafted in the first round" in t:
-        return 1.0 if raw_overall >= 70 else 0.90
+        return 1.0 if raw_overall >= cfg["first_round_threshold"] else cfg["first_round"]
     if "drafted in the first five" in t:
-        return 1.0 if raw_overall >= 60 else 0.80
+        return 1.0 if raw_overall >= cfg["first_five_threshold"] else cfg["first_five"]
     if "may sign if the deal is right" in t:
-        return 0.60
+        return cfg["may_sign"]
     if "undecided" in t:
-        return 0.40
+        return cfg["undecided"]
     if "probably won't sign" in t:
-        return 0.05
+        return cfg["probably_wont"]
     if "unknown" in t or "wasn't scouted" in t:
-        return 0.0
-    return 0.50
+        return cfg["unknown"]
+    return cfg["fallback"]
 
 
 BACKGROUND_SHEET = "Background Info"
@@ -585,12 +586,16 @@ def _write_master_list(
     Initial row order uses raw Overall as a rough approximation; the caller should
     follow up with _sort_master_list_via_excel() to get the real sort by formula values.
     """
-    from credentials import get_scouting_config
+    from credentials import get_scouting_config, get_signability_config
 
     scouting = get_scouting_config()
+    sign_cfg = get_signability_config()
+    min_trust = scouting["min_trust"]
+    curve = scouting["curve"]
+
     raw_trusts = {
-        "college": _raw_scouting_trust(scouting["college"]),
-        "high_school": _raw_scouting_trust(scouting["high_school"]),
+        "college": _raw_scouting_trust(scouting["college"], min_trust, curve),
+        "high_school": _raw_scouting_trust(scouting["high_school"], min_trust, curve),
     }
     best = max(raw_trusts.values())
     trust_factors = {k: v / best for k, v in raw_trusts.items()}
@@ -611,7 +616,7 @@ def _write_master_list(
         raw = _parse_score(_row_value_for_keys(row, ["Rating_15"]) or 0)
         category = _classify_player(age, player_class)
         scout_trust = trust_factors[category]
-        sign_factor = _signability_factor(signability, raw)
+        sign_factor = _signability_factor(signability, raw, sign_cfg)
         players.append({
             "sort_key": raw * scout_trust * sign_factor,
             "raw": raw, "scout": scout_trust, "sign": sign_factor,
@@ -629,7 +634,7 @@ def _write_master_list(
         raw = _parse_score(_row_value_for_keys(row, ["Rating_19"]) or 0)
         category = _classify_player(age, player_class)
         scout_trust = trust_factors[category]
-        sign_factor = _signability_factor(signability, raw)
+        sign_factor = _signability_factor(signability, raw, sign_cfg)
         players.append({
             "sort_key": raw * scout_trust * sign_factor,
             "raw": raw, "scout": scout_trust, "sign": sign_factor,

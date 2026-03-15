@@ -517,7 +517,15 @@ def get_current_rank_order_from_popup(driver: webdriver.Chrome) -> list[str]:
 
 
 def _normalize_name_for_match(name: str) -> str:
-    return " ".join(name.split()).strip()
+    """Normalize a player name for comparison: collapse whitespace AND convert
+    'Last, First' → 'First Last' so names from the draft table (Last, First)
+    match names from the popup (First Last)."""
+    name = " ".join(name.split()).strip()
+    if "," in name:
+        parts = [p.strip() for p in name.split(",", 1)]
+        if len(parts) == 2 and parts[0] and parts[1]:
+            name = f"{parts[1]} {parts[0]}"
+    return name
 
 
 def _find_button(driver: webdriver.Chrome, labels: list[str]):
@@ -545,16 +553,123 @@ def apply_draft_order_in_popup(
     """
     Reorder the Rank Players list to match desired_order.
 
-    Algorithm: process desired_order in REVERSE and send each player to the top
-    with ↑↑ (move-to-top). After all players are processed, the list is in the
-    correct order. This is O(n) button clicks instead of O(n²).
+    Primary method: reorder <option> elements inside the <select> via JavaScript
+    (instant, no clicking). Falls back to button-clicking if JS reorder fails.
     """
-    # The popup buttons may render as various Unicode arrow combinations
-    move_top_btn = _find_button(driver, ["↑ ↑", "↑↑", "⬆⬆", "⇈", "▲▲", "▲ ▲"])
-    move_up10_btn = _find_button(driver, ["↑x10", "⬆x10", "▲x10"])
-    move_up1_btn = _find_button(driver, ["↑", "⬆", "▲"])
+    # --- Primary: JavaScript DOM reorder (instant) ---
+    if _js_reorder_select(driver, desired_order):
+        log.info("Reordered list via JavaScript (instant).")
+        return
 
-    # Broader search: find all buttons/inputs near the listbox and identify by position/title
+    log.warning("JS reorder failed; falling back to button-click method.")
+    _button_click_reorder(driver, desired_order)
+
+
+def _js_reorder_select(
+    driver: webdriver.Chrome,
+    desired_order: list[str],
+) -> bool:
+    """
+    Reorder the Rank Players <select> via the page's own MovePlayer() JS function.
+    This properly updates the hidden ListMod field so the server accepts the changes.
+    Returns True on success.
+    """
+    desired_norm = [_normalize_name_for_match(n) for n in desired_order]
+
+    js = r"""
+    var sel = document.getElementById('ctl00_ctl00_Main_mcPH_PlayerList');
+    if (!sel) {
+        var selects = document.querySelectorAll('select');
+        for (var i = 0; i < selects.length; i++) {
+            if (selects[i].options.length > 5) { sel = selects[i]; break; }
+        }
+    }
+    if (!sel) return JSON.stringify({error: 'no select found'});
+
+    var desiredNames = arguments[0];
+
+    function extractName(text) {
+        return text.replace(/^\d+\.\s*/, '').replace(/\s*\([^)]+\)\s*$/, '').trim();
+    }
+
+    function buildNameMap() {
+        var map = {};
+        for (var i = 0; i < sel.options.length; i++) {
+            var name = extractName(sel.options[i].text).toLowerCase();
+            map[name] = i;
+        }
+        return map;
+    }
+
+    // Debug: show first few names from both sides for comparison
+    var debugOpts = [];
+    for (var i = 0; i < Math.min(5, sel.options.length); i++) {
+        debugOpts.push(extractName(sel.options[i].text));
+    }
+    var debugDesired = desiredNames.slice(0, 5);
+
+    var matched = 0;
+    var notFound = [];
+
+    // Process in reverse: move last desired player to top first, building the list bottom-up
+    for (var d = desiredNames.length - 1; d >= 0; d--) {
+        var nameMap = buildNameMap();
+        var target = desiredNames[d].toLowerCase();
+        var idx = nameMap[target];
+        if (idx !== undefined) {
+            sel.selectedIndex = idx;
+            MovePlayer(-10000, sel);
+            matched++;
+        } else {
+            notFound.push(desiredNames[d]);
+        }
+    }
+
+    return JSON.stringify({
+        ok: true,
+        matched: matched,
+        total: sel.options.length,
+        desired: desiredNames.length,
+        debugOpts: debugOpts,
+        debugDesired: debugDesired,
+        notFoundSample: notFound.slice(0, 5)
+    });
+    """
+    try:
+        result_str = driver.execute_script(js, desired_norm)
+        if not result_str:
+            log.warning("JS reorder returned null.")
+            return False
+        import json as _json
+        result = _json.loads(result_str)
+        if "error" in result:
+            log.warning("JS reorder error: %s", result["error"])
+            return False
+        log.info("JS reorder: matched %d / %d desired, %d total options.",
+                 result.get("matched", 0), result.get("desired", 0), result.get("total", 0))
+        if result.get("matched", 0) == 0:
+            log.warning("  Popup names sample: %s", result.get("debugOpts", []))
+            log.warning("  Excel names sample: %s", result.get("debugDesired", []))
+            log.warning("  Not found sample: %s", result.get("notFoundSample", []))
+            return False
+        if result.get("notFoundSample"):
+            log.debug("  Not found sample: %s", result.get("notFoundSample", []))
+        return True
+    except Exception as exc:
+        log.warning("JS reorder exception: %s", exc)
+        return False
+
+
+def _button_click_reorder(
+    driver: webdriver.Chrome,
+    desired_order: list[str],
+) -> None:
+    """Fallback: reorder by clicking move-to-top button for each player (slow but reliable)."""
+    # &uarr;&nbsp;&uarr; renders as ↑ followed by non-breaking space (\u00a0) followed by ↑
+    move_top_btn = _find_button(driver, ["↑\u00a0↑", "↑ ↑", "↑↑"])
+    move_up10_btn = _find_button(driver, ["↑x10"])
+    move_up1_btn = _find_button(driver, ["↑"])
+
     if not move_top_btn:
         try:
             for el in driver.find_elements(By.CSS_SELECTOR, "input[type='button'], input[type='submit'], button"):
@@ -567,7 +682,6 @@ def apply_draft_order_in_popup(
             pass
 
     if not move_top_btn:
-        # Log all visible buttons for debugging
         try:
             all_btns = driver.find_elements(By.CSS_SELECTOR, "input[type='button'], input[type='submit'], button")
             for b in all_btns:
@@ -578,15 +692,10 @@ def apply_draft_order_in_popup(
                 log.debug("  Button: value=%r  text=%r  title=%r  visible=%s", val, txt, title, vis)
         except Exception:
             pass
-        log.warning("Could not find ↑↑ (move to top) button; trying ↑x10 / ↑ fallback.")
+        log.warning("Could not find ↑↑ (move to top) button; using ↑x10 / ↑ fallback (slow).")
 
     def _select_player_at(index: int) -> bool:
-        """Click the player at the given 0-based index in the listbox."""
-        for sel in [
-            "select option",
-            "select[id*='Rank'] option",
-            "select[id*='lstPlayers'] option",
-        ]:
+        for sel in ["select option", "select[id*='Rank'] option", "select[id*='lstPlayers'] option"]:
             try:
                 items = driver.find_elements(By.CSS_SELECTOR, sel)
                 if index < len(items):
@@ -597,37 +706,32 @@ def apply_draft_order_in_popup(
         return False
 
     def _move_to_top() -> bool:
-        """Move the currently selected player to position 1."""
         if move_top_btn:
             try:
                 move_top_btn.click()
                 return True
             except Exception:
                 pass
-        # Fallback: click ↑x10 a few times then ↑ to finish
         if move_up10_btn:
             for _ in range(60):
                 try:
                     move_up10_btn.click()
+                    time.sleep(0.05)
                 except Exception:
                     break
         if move_up1_btn:
             for _ in range(10):
                 try:
                     move_up1_btn.click()
+                    time.sleep(0.05)
                 except Exception:
                     break
         return True
 
     desired_norm = [_normalize_name_for_match(n) for n in desired_order]
-
-    # Process in reverse: send last-pick to top first, then second-to-last, etc.
-    # After all are processed, desired_order[0] is at #1.
     total = len(desired_norm)
     for step, pick_index in enumerate(range(total - 1, -1, -1)):
         target_name = desired_norm[pick_index]
-
-        # Read the current list to find where this player is
         current = get_current_rank_order_from_popup(driver)
         current_norm = [_normalize_name_for_match(n) for n in current]
         try:
@@ -640,9 +744,9 @@ def apply_draft_order_in_popup(
             break
 
         _select_player_at(pos)
-        time.sleep(0.1)
+        time.sleep(0.15)
         _move_to_top()
-        time.sleep(0.1)
+        time.sleep(0.15)
 
         if (step + 1) % 25 == 0:
             log.info("Reorder progress: %d / %d", step + 1, total)
@@ -674,10 +778,10 @@ def open_rank_players_popup(driver: webdriver.Chrome) -> None:
 def save_rank_players_popup(driver: webdriver.Chrome) -> None:
     """Click Save in the Rank Players popup, then accept the confirmation dialog."""
     for by, sel in [
+        (By.ID, "ctl00_ctl00_Main_mcPH_SaveButton"),
+        (By.CSS_SELECTOR, "input.save[value='Save']"),
         (By.CSS_SELECTOR, "input[value='Save']"),
         (By.XPATH, "//input[@value='Save']"),
-        (By.XPATH, "//button[contains(.,'Save')]"),
-        (By.XPATH, "//*[contains(text(),'Save')]"),
     ]:
         try:
             btn = driver.find_element(by, sel)

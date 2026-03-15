@@ -46,8 +46,7 @@ def get_hbd_credentials() -> tuple[str, str] | None:
 
 def get_scouting_config() -> dict[str, float]:
     """
-    Return scouting budget config from env vars or credentials.env.
-    Keys: 'college', 'high_school', 'max_budget'.
+    Return scouting budget and formula config from env vars or credentials.env.
     """
     env = _load_env_file()
     def _val(env_key: str, default: float) -> float:
@@ -60,6 +59,36 @@ def get_scouting_config() -> dict[str, float]:
     return {
         "college": _val("SCOUTING_COLLEGE", 0.0),
         "high_school": _val("SCOUTING_HIGH_SCHOOL", 0.0),
+        "min_trust": _val("SCOUTING_MIN_TRUST", 0.10),
+        "curve": _val("SCOUTING_CURVE", 0.17),
+    }
+
+
+def get_signability_config() -> dict[str, float]:
+    """
+    Return signability penalty multipliers from env vars or credentials.env.
+    Each key maps a signability text category to its multiplier (0.0–1.0).
+    Also includes overall thresholds for conditional penalties.
+    """
+    env = _load_env_file()
+    def _val(env_key: str, default: float) -> float:
+        raw = os.environ.get(env_key, "").strip() or env.get(env_key, "")
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            return default
+
+    return {
+        "will_sign": _val("SIGN_WILL_SIGN", 1.0),
+        "first_round": _val("SIGN_FIRST_ROUND", 0.90),
+        "first_round_threshold": _val("SIGN_FIRST_ROUND_THRESHOLD", 70.0),
+        "first_five": _val("SIGN_FIRST_FIVE", 0.80),
+        "first_five_threshold": _val("SIGN_FIRST_FIVE_THRESHOLD", 60.0),
+        "may_sign": _val("SIGN_MAY_SIGN", 0.60),
+        "undecided": _val("SIGN_UNDECIDED", 0.40),
+        "probably_wont": _val("SIGN_PROBABLY_WONT", 0.05),
+        "unknown": _val("SIGN_UNKNOWN", 0.0),
+        "fallback": _val("SIGN_FALLBACK", 0.50),
     }
 
 
