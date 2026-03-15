@@ -226,6 +226,255 @@ FIELDING_HEADERS: list[str] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Algorithm config: generate formulas from algorithm.json
+# (polynomial coefficients + all individual/group weights)
+# ---------------------------------------------------------------------------
+ALGORITHM_FILE = Path(__file__).resolve().parent / "algorithm.json"
+ALGORITHM_SHEET = "Algorithm"
+
+# Rating name → Excel column letter for each sheet (fixed by template layout).
+_HITTER_RATING_COL: dict[str, str] = {
+    "Contact": "H", "Power": "I", "vs L": "J", "vs R": "K", "Batting Eye": "L",
+    "Baserunning": "M", "Arm": "N", "Bunt": "O",
+    "Range": "W", "Glove": "X", "Arm Strength": "Y", "Arm Accuracy": "Z",
+    "Pitch Calling": "AA", "Durability": "AB", "Health": "AC",
+    "Speed": "AD", "Patience": "AE", "Temper": "AF", "Makeup": "AG",
+}
+_PITCHER_RATING_COL: dict[str, str] = {
+    "Durability": "H", "Stamina": "I", "Control": "J", "vsL": "K", "vsR": "L",
+    "Velocity": "M", "GB/FB": "N",
+    "Pitch 1": "O", "Pitch 2": "P", "Pitch 3": "Q", "Pitch 4": "R", "Pitch 5": "S",
+}
+
+_H_INTER_START = 35   # Column AI — first hitter intermediate column
+_P_INTER_START = 21   # Column U  — first pitcher intermediate column
+_H_REF_ROW = 5        # Hitter "perfect player" row (all 100s)
+_P_REF_ROW = 4        # Pitcher "perfect player" row (all 100s)
+_H_WEIGHT_ROW = 1     # Individual weight row for hitters
+_H_CATCHER_ROW = 2    # Catcher-specific weight row for hitters
+_H_GROUP_ROW = 3      # Group weight row for hitters
+_P_WEIGHT_ROW = 1     # Individual weight row for pitchers
+_P_GROUP_ROW = 2      # Group weight row for pitchers
+
+
+def _load_algorithm_config() -> dict | None:
+    """Load algorithm.json if it exists. Returns None if missing or invalid."""
+    if not ALGORITHM_FILE.exists():
+        return None
+    try:
+        import json
+        with open(ALGORITHM_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        log.warning("Could not load algorithm.json: %s", exc)
+        return None
+
+
+def _col_letter_to_idx(col: str) -> int:
+    """Convert Excel column letter(s) to 1-based index: A→1, Z→26, AA→27."""
+    idx = 0
+    for ch in col.upper():
+        idx = idx * 26 + (ord(ch) - 64)
+    return idx
+
+
+def _fmtc(v: float) -> str:
+    """Format a coefficient for Excel formulas (no scientific notation)."""
+    if v == 0:
+        return "0"
+    s = f"{v:.12g}"
+    if "e" in s or "E" in s:
+        s = f"{v:.15f}".rstrip("0").rstrip(".")
+    return s
+
+
+def _poly(cell: str, coeff: dict) -> str:
+    """Build the polynomial expression for one cell: a3*cell^3 + a2*cell^2 + a1*cell + a0."""
+    a3, a2, a1, a0 = coeff.get("a3", 0), coeff.get("a2", 0), coeff.get("a1", 0), coeff.get("a0", 0)
+    parts: list[str] = []
+    if a3:
+        c = _fmtc(a3)
+        parts.append(f"({c})*{cell}^3" if a3 < 0 else f"{c}*{cell}^3")
+    if a2:
+        c = _fmtc(a2)
+        parts.append(f"({c})*{cell}^2" if a2 < 0 else f"{c}*{cell}^2")
+    if a1:
+        c = _fmtc(a1)
+        parts.append(f"({c})*{cell}" if a1 < 0 else f"{c}*{cell}")
+    if a0:
+        parts.append(_fmtc(a0))
+    return "+".join(parts) if parts else "0"
+
+
+def _weighted_poly(row: int, ratings: list[tuple[str, str]], coeff: dict) -> str:
+    """SUM of weight_cell * poly(rating_cell) for a group.  ratings = [(col_letter, weight_cell), ...]"""
+    return "+".join(f"{w}*({_poly(f'{c}{row}', coeff)})" for c, w in ratings)
+
+
+def _simple_weighted(row: int, ratings: list[tuple[str, str]]) -> str:
+    """(w1*r1 + w2*r2 + ...)/100 for groups that skip the polynomial."""
+    inner = "+".join(f"{w}*{c}{row}" for c, w in ratings)
+    return f"({inner})/100"
+
+
+def _build_rating_refs(
+    ratings_cfg: dict[str, float],
+    col_map: dict[str, str],
+    weight_row: int,
+) -> list[tuple[str, str]]:
+    """Convert {"Contact": 1.2, ...} → [("H", "H$1"), ...] for formula helpers."""
+    refs: list[tuple[str, str]] = []
+    for rname in ratings_cfg:
+        col = col_map.get(rname)
+        if col:
+            refs.append((col, f"{col}${weight_row}"))
+        else:
+            log.warning("Algorithm config: unknown rating '%s'; skipping.", rname)
+    return refs
+
+
+def _write_weights_to_sheet(
+    ws,
+    groups_cfg: dict,
+    col_map: dict[str, str],
+    weight_row: int,
+    catcher_row: int | None,
+    group_row: int,
+    inter_start: int,
+) -> None:
+    """Write individual rating weights (row 1), catcher weights (row 2), and
+    group weights to their designated cells."""
+    from openpyxl.utils import get_column_letter
+
+    for gi, (gname, gdef) in enumerate(groups_cfg.items()):
+        inter_col = inter_start + gi
+        ws.cell(group_row, inter_col, float(gdef.get("group_weight", 1)))
+
+        for rname, rweight in gdef.get("ratings", {}).items():
+            col = col_map.get(rname)
+            if col:
+                ws.cell(weight_row, _col_letter_to_idx(col), float(rweight))
+
+        if catcher_row:
+            for rname, rweight in gdef.get("catcher_ratings", {}).items():
+                col = col_map.get(rname)
+                if col:
+                    ws.cell(catcher_row, _col_letter_to_idx(col), float(rweight))
+
+
+def _generate_group_formula(
+    row: int,
+    gdef: dict,
+    col_map: dict[str, str],
+    weight_row: int,
+    catcher_row: int | None,
+    coeff: dict,
+    is_ref: bool = False,
+) -> str:
+    """Generate the intermediate-column formula for one group at one row."""
+    method = gdef.get("method", "polynomial")
+    refs = _build_rating_refs(gdef.get("ratings", {}), col_map, weight_row)
+
+    if method == "polynomial":
+        expr = _weighted_poly(row, refs, coeff)
+    else:
+        expr = _simple_weighted(row, refs)
+
+    catcher_cfg = gdef.get("catcher_ratings")
+    if catcher_cfg and catcher_row:
+        catcher_refs = _build_rating_refs(catcher_cfg, col_map, catcher_row)
+        if method == "polynomial":
+            catcher_expr = _weighted_poly(row, catcher_refs, coeff)
+        else:
+            catcher_expr = _simple_weighted(row, catcher_refs)
+        cond_col = col_map.get(gdef.get("catcher_condition", "Pitch Calling"), "AA")
+        threshold = int(gdef.get("catcher_threshold", 50))
+        cond_op = ">" if is_ref else "<"
+        return f"=IF({cond_col}{row}{cond_op}{threshold},{expr},{catcher_expr})"
+
+    return f"={expr}"
+
+
+def _generate_col_a(
+    row: int,
+    n_groups: int,
+    inter_start: int,
+    group_row: int,
+    ref_row: int,
+) -> str:
+    """Column A = (SUM of intermediate*group_weight)*100 / (SUM of ref*group_weight)."""
+    from openpyxl.utils import get_column_letter
+    parts_num: list[str] = []
+    parts_den: list[str] = []
+    for gi in range(n_groups):
+        ic = get_column_letter(inter_start + gi)
+        gw = f"{ic}${group_row}"
+        parts_num.append(f"{ic}{row}*{gw}")
+        parts_den.append(f"{ic}${ref_row}*{gw}")
+    return f"=({'+'.join(parts_num)})*100/({'+'.join(parts_den)})"
+
+
+def _apply_algorithm_formulas(
+    wb: openpyxl.Workbook,
+    algo: dict,
+    n_hitters: int,
+    n_pitchers: int,
+) -> None:
+    """Write weights, intermediate-column formulas, and column-A formulas
+    from algorithm.json (polynomial + all weights)."""
+    coeff = algo.get("polynomial", {})
+    if not coeff:
+        return
+
+    for sheet_name, section, col_map, n_rows, header_row, ref_row, \
+            inter_start, w_row, c_row, g_row in [
+        (HITTERS_SHEET, "hitters", _HITTER_RATING_COL, n_hitters,
+         HITTERS_HEADER_ROW, _H_REF_ROW, _H_INTER_START,
+         _H_WEIGHT_ROW, _H_CATCHER_ROW, _H_GROUP_ROW),
+        (PITCHERS_SHEET, "pitchers", _PITCHER_RATING_COL, n_pitchers,
+         PITCHERS_HEADER_ROW, _P_REF_ROW, _P_INTER_START,
+         _P_WEIGHT_ROW, None, _P_GROUP_ROW),
+    ]:
+        groups_cfg = algo.get(section, {}).get("groups", {})
+        if not groups_cfg or sheet_name not in wb.sheetnames or n_rows == 0:
+            continue
+
+        ws = wb[sheet_name]
+        n_groups = len(groups_cfg)
+
+        _write_weights_to_sheet(ws, groups_cfg, col_map, w_row, c_row, g_row, inter_start)
+
+        all_rows = [ref_row] + [header_row + 1 + i for i in range(n_rows)]
+        for r in all_rows:
+            is_ref = (r == ref_row)
+            for gi, (gname, gdef) in enumerate(groups_cfg.items()):
+                fml = _generate_group_formula(r, gdef, col_map, w_row, c_row, coeff, is_ref)
+                ws.cell(r, inter_start + gi, fml)
+            if r != ref_row:
+                ws.cell(r, 1, _generate_col_a(r, n_groups, inter_start, g_row, ref_row))
+
+        # Write group labels on the header row at the intermediate columns
+        from openpyxl.utils import get_column_letter
+        for gi, gname in enumerate(groups_cfg):
+            ws.cell(header_row, inter_start + gi, gname)
+
+    # ── Write coefficients to Algorithm tab for visibility ──
+    if ALGORITHM_SHEET not in wb.sheetnames:
+        wb.create_sheet(ALGORITHM_SHEET)
+    ws_a = wb[ALGORITHM_SHEET]
+    ws_a.cell(1, 13, "a3")
+    ws_a.cell(1, 14, "a2")
+    ws_a.cell(1, 15, "a1")
+    ws_a.cell(1, 16, "a0")
+    ws_a.cell(2, 13, coeff.get("a3", 0))
+    ws_a.cell(2, 14, coeff.get("a2", 0))
+    ws_a.cell(2, 15, coeff.get("a1", 0))
+    ws_a.cell(2, 16, coeff.get("a0", 0))
+
+    log.info("Formulas and weights written from algorithm.json.")
+
+
 def _row_value_for_keys(row: dict[str, Any], keys: list[str]) -> Any:
     """Return row[key] for the first key that exists (case-insensitive key match)."""
     row_lower = {str(k).strip().lower(): v for k, v in row.items() if k is not None and str(k).strip()}
@@ -716,6 +965,11 @@ def write_draft_data_to_excel(
                 val = _row_value_for_keys(row, keys)
                 if val is not None:
                     ws.cell(PITCHERS_HEADER_ROW + 1 + i, col_idx, val)
+
+    # Generate column-A formulas from algorithm.json (if present)
+    algo = _load_algorithm_config()
+    if algo:
+        _apply_algorithm_formulas(wb, algo, len(hitters_rows), len(pitchers_rows))
 
     # Wrap column-A formulas with IFERROR so errors show 0 instead of #VALUE!
     for sheet_name, header_row, n_rows in [

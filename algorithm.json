@@ -1,0 +1,103 @@
+{
+    "_comment": "Polynomial coefficients and all rating/group weights. Delete this file to use template formulas as-is.",
+    "polynomial": {
+        "a3": -0.000002,
+        "a2": 0.00032,
+        "a1": -0.0021,
+        "a0": 0
+    },
+    "hitters": {
+        "groups": {
+            "hitting": {
+                "group_weight": 2.5,
+                "method": "polynomial",
+                "ratings": {
+                    "Contact": 1.2,
+                    "Power": 2.0,
+                    "vs L": 1.0,
+                    "vs R": 1.2,
+                    "Batting Eye": 1.6
+                }
+            },
+            "baserunning": {
+                "group_weight": 0.6,
+                "method": "polynomial",
+                "ratings": {
+                    "Baserunning": 1.0,
+                    "Arm": 0.2,
+                    "Bunt": 0.1
+                }
+            },
+            "fielding": {
+                "group_weight": 2.0,
+                "method": "polynomial",
+                "ratings": {
+                    "Range": 1.0,
+                    "Glove": 1.0,
+                    "Arm Strength": 1.0,
+                    "Arm Accuracy": 1.0
+                },
+                "catcher_condition": "Pitch Calling",
+                "catcher_threshold": 50,
+                "catcher_ratings": {
+                    "Glove": 0.2,
+                    "Arm Strength": 0.5,
+                    "Arm Accuracy": 0.3,
+                    "Pitch Calling": 1.0
+                }
+            },
+            "durability": {
+                "group_weight": 1.0,
+                "method": "polynomial",
+                "ratings": {
+                    "Durability": 0.8,
+                    "Health": 0.2
+                }
+            },
+            "intangibles": {
+                "group_weight": 0.6,
+                "method": "polynomial",
+                "ratings": {
+                    "Speed": 1.0,
+                    "Patience": 0.1,
+                    "Temper": 0.1,
+                    "Makeup": 0.1
+                }
+            }
+        }
+    },
+    "pitchers": {
+        "groups": {
+            "pitching": {
+                "group_weight": 4.0,
+                "method": "polynomial",
+                "ratings": {
+                    "Control": 2.0,
+                    "vsL": 1.0,
+                    "vsR": 1.5,
+                    "Velocity": 0.2,
+                    "GB/FB": 0.2
+                }
+            },
+            "pitches": {
+                "group_weight": 2.0,
+                "method": "polynomial",
+                "ratings": {
+                    "Pitch 1": 2.0,
+                    "Pitch 2": 2.0,
+                    "Pitch 3": 1.0,
+                    "Pitch 4": 0.5,
+                    "Pitch 5": 0.3
+                }
+            },
+            "durability": {
+                "group_weight": 1.0,
+                "method": "polynomial",
+                "ratings": {
+                    "Durability": 1.0,
+                    "Stamina": 4.0
+                }
+            }
+        }
+    }
+}

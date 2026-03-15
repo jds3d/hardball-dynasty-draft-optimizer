@@ -1,0 +1,23 @@
+{
+    "_comment": "Copy to config.json and adjust to your team. Do not commit config.json.",
+
+    "scouting": {
+        "college": 0,
+        "high_school": 10,
+        "min_trust": 0.75,
+        "curve": 0.17
+    },
+
+    "signability": {
+        "will_sign": 1.0,
+        "first_round": 0.90,
+        "first_round_threshold": 70,
+        "first_five": 0.80,
+        "first_five_threshold": 60,
+        "may_sign": 0.60,
+        "undecided": 0.40,
+        "probably_wont": 0.05,
+        "unknown": 0.0,
+        "fallback": 0.50
+    }
+}

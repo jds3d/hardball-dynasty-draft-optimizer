@@ -7,7 +7,7 @@ Automate your [WhatIfSports Hardball Dynasty](https://www.whatifsports.com/hbd/)
 - Scrapes hitting, fielding, pitching, and background-info views into a single Excel file.
 - Generates a **Master List** that ranks every prospect by an adjusted score factoring in your template's projection formula, scouting-budget trust, and signability risk.
 - Applies that order to the site's Rank Players popup via Selenium (instant JavaScript reorder).
-- All penalty weights and formula constants are configurable in `credentials.env`.
+- All penalty weights and formula constants are configurable in `config.json` and `algorithm.json`.
 
 ## Setup
 
@@ -28,10 +28,16 @@ Automate your [WhatIfSports Hardball Dynasty](https://www.whatifsports.com/hbd/)
    - A **Hitters** sheet (header row 6) with columns: `Rnk`, `Player`, `Pos`, `B`, `T`, `Age`, plus rating columns and an **Overall Projection** formula in column A.
    - A **Pitchers** sheet (header row 5) with the same structure.
 
-5. **Credentials and config:** Copy `credentials.env.example` to `credentials.env` and fill in your values. This file is in `.gitignore` — never commit it.
+5. **Credentials:** Copy `credentials.env.example` to `credentials.env` and fill in your login. This file is in `.gitignore` — never commit it.
 
    ```bash
    cp credentials.env.example credentials.env
+   ```
+
+6. **Config:** Copy `config.json.example` to `config.json` and adjust scouting budgets and signability penalties for your team.
+
+   ```bash
+   cp config.json.example config.json
    ```
 
 ## Commands
@@ -82,16 +88,23 @@ If no file is specified, the most recently modified `.xlsx` in `outputs/` is use
 
 | Region | Columns | Contents |
 |--------|---------|----------|
-| Projection | A | Overall Projection (template formula, wrapped with `IFERROR`) |
+| Projection | A | Overall Projection (formula generated from `algorithm.json`; wrapped with `IFERROR`) |
 | Hitting | B–P | Rnk, Player, Pos, B, T, Age, Contact, Power, vs L, vs R, Batting Eye, Baserunning, Arm, Bunt, Overall |
 | Fielding | Q onward | Rank, Player, Pos, B, T, Age, Range, Glove, Arm Strength, Arm Accuracy, Pitch Calling, Durability, Health, Speed, Patience, Temper, Makeup, Overall |
+| Weights | Row 1 | Individual rating weights from `algorithm.json` (at each rating column) |
+| Catcher weights | Row 2 | Alternate fielding weights for catchers |
+| Group weights | Row 3 | Group weights at intermediate columns (AI–AM) |
+| Intermediates | AI–AM | Computed group scores: hitting, baserunning, fielding, durability/health, intangibles |
 
 ### Pitchers (header row 5)
 
 | Region | Columns | Contents |
 |--------|---------|----------|
-| Projection | A | Overall Projection (template formula, wrapped with `IFERROR`) |
+| Projection | A | Overall Projection (formula generated from `algorithm.json`; wrapped with `IFERROR`) |
 | Ratings | B–S | Rank, Player, Position, B, T, Age, Durability, Stamina, Control, vsL, vsR, Velocity, GB/FB Tendency, Pitch 1–5, Overall |
+| Weights | Row 1 | Individual rating weights from `algorithm.json` (at each rating column) |
+| Group weights | Row 2 | Group weights at intermediate columns (U–W) |
+| Intermediates | U–W | Computed group scores: pitching, pitches, durability/stamina |
 
 ### Master List (auto-generated)
 
@@ -114,11 +127,9 @@ The Master List is sorted by Adjusted Score descending. Players with a zero scor
 
 Rnk, Player, Pos, B, T, Age, Hometown, School, Class, Signability.
 
-## Configuration (`credentials.env`)
+## Credentials (`credentials.env`)
 
-All settings have sensible defaults. Omit any line to use the default.
-
-### Login
+Login and browser settings only. Copy `credentials.env.example` to `credentials.env`.
 
 | Key | Description |
 |-----|-------------|
@@ -126,50 +137,158 @@ All settings have sensible defaults. Omit any line to use the default.
 | `PASSWORD` | WhatIfSports password |
 | `HEADLESS` | `true` / `false` — run browser without a window (default: `false`) |
 
-### Scouting Budgets
+## Game Configuration (`config.json`)
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `SCOUTING_COLLEGE` | `0` | Your college scouting budget ($M, 0–20) |
-| `SCOUTING_HIGH_SCHOOL` | `0` | Your high school scouting budget ($M, 0–20) |
+Scouting and signability settings for your team. Copy `config.json.example` to `config.json`. All values have sensible defaults — omit any key to use the default.
 
-Whichever category has the higher budget gets a trust factor of 1.0 (no penalty). The other category is penalized relative to it. Players are classified by age: 18 = high school, 19+ = college (including junior college). The `Class` field from Background Info is also used when available.
+### Scouting
 
-### Scouting Trust Formula
-
-The trust multiplier for the lower-budget category is computed as:
-
-```
-trust = MIN_TRUST + (1 - MIN_TRUST) × (budget / 20) ^ CURVE
+```json
+"scouting": {
+    "college": 0,
+    "high_school": 10,
+    "min_trust": 0.75,
+    "curve": 0.17
+}
 ```
 
-Then normalized so the higher category always equals 1.0.
+| Key | Default | Description |
+|-----|---------|-------------|
+| `college` | `0` | Your college scouting budget ($M, 0–20) |
+| `high_school` | `0` | Your high school scouting budget ($M, 0–20) |
+| `min_trust` | `0.10` | Floor trust at $0 scouting (how much you trust unscouted ratings) |
+| `curve` | `0.17` | Exponent — lower values mean trust ramps up faster at low budgets |
+
+Whichever category has the higher budget gets a trust factor of 1.0 (no penalty). The other is penalized relative to it using: `trust = min_trust + (1 - min_trust) × (budget / 20) ^ curve`. Players are classified by age: 18 = high school, 19+ = college. The max budget in HBD is always $20M.
+
+### Signability
+
+```json
+"signability": {
+    "will_sign": 1.0,
+    "first_round": 0.90,
+    "first_round_threshold": 70,
+    "first_five": 0.80,
+    "first_five_threshold": 60,
+    "may_sign": 0.60,
+    "undecided": 0.40,
+    "probably_wont": 0.05,
+    "unknown": 0.0,
+    "fallback": 0.50
+}
+```
+
+Each value is a multiplier (0.0–1.0) applied to the player's Adjusted Score. 1.0 = no penalty, 0.0 = effectively excluded.
+
+The `first_round` and `first_five` penalties are conditional: if the player's raw overall rating meets the threshold, no penalty is applied (they're good enough to justify the pick).
+
+## Projection Algorithm (`algorithm.json`)
+
+Everything that controls the Overall Projection formula lives in `algorithm.json`: the polynomial coefficients, every individual rating weight, group weights, and the method used for each group. If you delete the file, the script preserves whatever formulas are already in your template.
+
+### How it works
+
+1. Each rating is transformed through a **3rd-order polynomial**: `f(x) = a3·x³ + a2·x² + a1·x + a0`
+2. The transformed rating is multiplied by its **individual weight**.
+3. Weighted ratings are summed into **groups** (e.g. hitting, fielding, pitching).
+4. Groups are combined using **group weights** and normalized against a "perfect player" reference row (all 100s) to produce the Overall Projection in column A.
+
+Groups with `"method": "simple"` skip the polynomial and use a plain weighted average instead.
+
+### Config structure
+
+```json
+{
+    "polynomial": {
+        "a3": -0.000002,
+        "a2": 0.00032,
+        "a1": -0.0021,
+        "a0": 0
+    },
+    "hitters": {
+        "groups": {
+            "hitting": {
+                "group_weight": 2.5,
+                "method": "polynomial",
+                "ratings": { "Contact": 1.2, "Power": 2.0, ... }
+            },
+            "fielding": {
+                "group_weight": 2.0,
+                "method": "polynomial",
+                "ratings": { "Range": 1.0, "Glove": 1.0, ... },
+                "catcher_condition": "Pitch Calling",
+                "catcher_threshold": 50,
+                "catcher_ratings": { "Glove": 0.2, "Arm Strength": 0.5, ... }
+            },
+            ...
+        }
+    },
+    "pitchers": {
+        "groups": { ... }
+    }
+}
+```
+
+### Polynomial coefficients
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `SCOUTING_MIN_TRUST` | `0.10` | Floor multiplier at $0 scouting (0.10 = 90% discount) |
-| `SCOUTING_CURVE` | `0.17` | Exponent — lower values mean trust ramps up faster at low budgets |
+| `a3` | `-0.000002` | Cubic coefficient |
+| `a2` | `0.00032` | Quadratic coefficient |
+| `a1` | `-0.0021` | Linear coefficient |
+| `a0` | `0` | Constant term |
 
-The max scouting budget in HBD is always $20M.
+Default curve: `f(x) = -0.000002·x³ + 0.00032·x² - 0.0021·x` — compresses high ratings toward the top so that 80 and 90 are both close to the maximum (86% and 95% of perfect), while lower ratings like 60 and 70 are penalized more steeply (60% and 74%). The effect is that elite ratings are all treated as "good enough" while mediocre ones are clearly separated. Coefficients are also written to the Algorithm tab (columns M–P) for reference.
 
-### Signability Penalties
+### Rating names
 
-Each value is a multiplier (0.0–1.0) applied to the player's Adjusted Score on the Master List. 1.0 = no penalty, 0.0 = effectively excluded.
+These must match the names used in `algorithm.json`:
 
-The "first round" and "first five rounds" penalties are conditional: if the player's raw overall rating meets the threshold, there is no penalty (they're good enough to justify the pick).
+**Hitters:** Contact, Power, vs L, vs R, Batting Eye, Baserunning, Arm, Bunt, Range, Glove, Arm Strength, Arm Accuracy, Pitch Calling, Durability, Health, Speed, Patience, Temper, Makeup
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `SIGN_WILL_SIGN` | `1.0` | "will sign for slot" / "looking to sign" |
-| `SIGN_FIRST_ROUND` | `0.90` | "drafted in the first round" (penalty if below threshold) |
-| `SIGN_FIRST_ROUND_THRESHOLD` | `70` | No penalty if raw overall >= this |
-| `SIGN_FIRST_FIVE` | `0.80` | "drafted in the first five rounds" (penalty if below threshold) |
-| `SIGN_FIRST_FIVE_THRESHOLD` | `60` | No penalty if raw overall >= this |
-| `SIGN_MAY_SIGN` | `0.60` | "may sign if the deal is right" |
-| `SIGN_UNDECIDED` | `0.40` | "undecided" |
-| `SIGN_PROBABLY_WONT` | `0.05` | "probably won't sign" |
-| `SIGN_UNKNOWN` | `0.0` | "unknown" / "wasn't scouted" |
-| `SIGN_FALLBACK` | `0.50` | Any other unrecognized signability text |
+**Pitchers:** Durability, Stamina, Control, vsL, vsR, Velocity, GB/FB, Pitch 1, Pitch 2, Pitch 3, Pitch 4, Pitch 5
+
+### Group properties
+
+| Property | Required | Description |
+|----------|----------|-------------|
+| `group_weight` | Yes | How much this group contributes to the final score (only ratios matter between groups) |
+| `method` | No | `"polynomial"` (default) or `"simple"` (plain weighted average, no polynomial) |
+| `ratings` | Yes | `{name: weight}` — individual rating weights within the group |
+| `catcher_condition` | No | Rating name used for the IF condition (e.g. `"Pitch Calling"`) |
+| `catcher_threshold` | No | Threshold value for the condition (default 50) |
+| `catcher_ratings` | No | Alternate `{name: weight}` used when the condition rating ≥ threshold |
+
+The `catcher_*` fields let you define alternate fielding weights for catchers. When a player's Pitch Calling is ≥ the threshold, the `catcher_ratings` weights are used instead of `ratings`.
+
+### Where weights are written
+
+The script writes all weights from `algorithm.json` into the Excel sheet so they're visible:
+
+- **Row 1:** Individual rating weights at their column (e.g. Contact weight → H1)
+- **Row 2 (hitters only):** Catcher-specific weights
+- **Row 3 (hitters) / Row 2 (pitchers):** Group weights at the intermediate columns (AI–AM for hitters, U–W for pitchers)
+
+### Examples
+
+Make fielding matter more for hitters:
+
+```json
+"hitting":  { "group_weight": 1.5, ... },
+"fielding": { "group_weight": 3.0, ... }
+```
+
+Double the weight of Power:
+
+```json
+"ratings": { "Contact": 1.2, "Power": 4.0, "vs L": 1.0, ... }
+```
+
+Use a linear algorithm (disable the polynomial):
+
+```json
+"polynomial": { "a3": 0, "a2": 0, "a1": 1, "a0": 0 }
+```
 
 ## Project Structure
 
@@ -178,10 +297,13 @@ hardball-dynasty-draft-optimizer/
 ├── main.py                 # CLI entry point (fetch / apply-order)
 ├── web_draft.py            # Selenium scraping, login, and Rank Players automation
 ├── excel_draft.py          # Excel reading/writing, Master List generation, COM sorting
-├── credentials.py          # Loads config from credentials.env / env vars
+├── credentials.py          # Loads credentials + config from their respective files
+├── algorithm.json          # Projection algorithm: polynomial + all rating/group weights
+├── config.json             # Scouting budgets, trust formula, signability penalties (gitignored)
+├── config.json.example     # Template for config.json
 ├── requirements.txt        # Python dependencies
 ├── credentials.env.example # Template for credentials.env
-├── credentials.env         # Your config (gitignored)
+├── credentials.env         # Login credentials (gitignored)
 ├── *.xlsx                  # Your Excel template (gitignored)
 └── outputs/                # Generated output files (gitignored)
 ```
