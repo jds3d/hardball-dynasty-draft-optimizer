@@ -520,45 +520,132 @@ def _normalize_name_for_match(name: str) -> str:
     return " ".join(name.split()).strip()
 
 
+def _find_button(driver: webdriver.Chrome, labels: list[str]):
+    """Find a visible button/input matching any of the given labels (value or text)."""
+    for label in labels:
+        for by, sel in [
+            (By.CSS_SELECTOR, f"input[value='{label}']"),
+            (By.XPATH, f"//input[@value='{label}']"),
+            (By.XPATH, f"//button[normalize-space(.)='{label}']"),
+            (By.XPATH, f"//a[normalize-space(.)='{label}']"),
+        ]:
+            try:
+                for el in driver.find_elements(by, sel):
+                    if el.is_displayed() and el.is_enabled():
+                        return el
+            except Exception:
+                continue
+    return None
+
+
 def apply_draft_order_in_popup(
     driver: webdriver.Chrome,
     desired_order: list[str],
 ) -> None:
     """
-    In the Rank Players popup, reorder the list to match desired_order.
-    desired_order[0] = first pick, etc.
-    """
-    desired_norm = [_normalize_name_for_match(n) for n in desired_order]
-    # Find move up / move down buttons by text or value
-    def get_current_list() -> list[str]:
-        return get_current_rank_order_from_popup(driver)
+    Reorder the Rank Players list to match desired_order.
 
-    for target_index in range(len(desired_norm)):
-        desired_name = desired_norm[target_index]
-        current = get_current_list()
-        current_norm = [_normalize_name_for_match(n) for n in current]
+    Algorithm: process desired_order in REVERSE and send each player to the top
+    with ↑↑ (move-to-top). After all players are processed, the list is in the
+    correct order. This is O(n) button clicks instead of O(n²).
+    """
+    # The popup buttons may render as various Unicode arrow combinations
+    move_top_btn = _find_button(driver, ["↑ ↑", "↑↑", "⬆⬆", "⇈", "▲▲", "▲ ▲"])
+    move_up10_btn = _find_button(driver, ["↑x10", "⬆x10", "▲x10"])
+    move_up1_btn = _find_button(driver, ["↑", "⬆", "▲"])
+
+    # Broader search: find all buttons/inputs near the listbox and identify by position/title
+    if not move_top_btn:
         try:
-            current_pos = current_norm.index(desired_name)
-        except ValueError:
-            continue
-        if current_pos <= target_index:
-            continue
-        # Select the player (click list item)
-        try:
-            items = driver.find_elements(By.CSS_SELECTOR, "select option, ul li, table tbody tr")
-            if current_pos < len(items):
-                items[current_pos].click()
-                time.sleep(0.15)
+            for el in driver.find_elements(By.CSS_SELECTOR, "input[type='button'], input[type='submit'], button"):
+                val = (el.get_attribute("value") or el.text or "").strip()
+                title = (el.get_attribute("title") or "").strip().lower()
+                if "top" in title or "first" in title or val in ("↑ ↑", "↑↑"):
+                    move_top_btn = el
+                    break
         except Exception:
             pass
-        # Click move up (current_pos - target_index) times
-        for _ in range(current_pos - target_index):
+
+    if not move_top_btn:
+        # Log all visible buttons for debugging
+        try:
+            all_btns = driver.find_elements(By.CSS_SELECTOR, "input[type='button'], input[type='submit'], button")
+            for b in all_btns:
+                val = (b.get_attribute("value") or "").strip()
+                txt = (b.text or "").strip()
+                title = (b.get_attribute("title") or "").strip()
+                vis = b.is_displayed()
+                log.debug("  Button: value=%r  text=%r  title=%r  visible=%s", val, txt, title, vis)
+        except Exception:
+            pass
+        log.warning("Could not find ↑↑ (move to top) button; trying ↑x10 / ↑ fallback.")
+
+    def _select_player_at(index: int) -> bool:
+        """Click the player at the given 0-based index in the listbox."""
+        for sel in [
+            "select option",
+            "select[id*='Rank'] option",
+            "select[id*='lstPlayers'] option",
+        ]:
             try:
-                btn = driver.find_element(By.XPATH, "//input[@value='↑'] | //button[contains(.,'↑')] | //a[contains(.,'↑')]")
-                btn.click()
-                time.sleep(0.2)
+                items = driver.find_elements(By.CSS_SELECTOR, sel)
+                if index < len(items):
+                    items[index].click()
+                    return True
             except Exception:
-                break
+                continue
+        return False
+
+    def _move_to_top() -> bool:
+        """Move the currently selected player to position 1."""
+        if move_top_btn:
+            try:
+                move_top_btn.click()
+                return True
+            except Exception:
+                pass
+        # Fallback: click ↑x10 a few times then ↑ to finish
+        if move_up10_btn:
+            for _ in range(60):
+                try:
+                    move_up10_btn.click()
+                except Exception:
+                    break
+        if move_up1_btn:
+            for _ in range(10):
+                try:
+                    move_up1_btn.click()
+                except Exception:
+                    break
+        return True
+
+    desired_norm = [_normalize_name_for_match(n) for n in desired_order]
+
+    # Process in reverse: send last-pick to top first, then second-to-last, etc.
+    # After all are processed, desired_order[0] is at #1.
+    total = len(desired_norm)
+    for step, pick_index in enumerate(range(total - 1, -1, -1)):
+        target_name = desired_norm[pick_index]
+
+        # Read the current list to find where this player is
+        current = get_current_rank_order_from_popup(driver)
+        current_norm = [_normalize_name_for_match(n) for n in current]
+        try:
+            pos = current_norm.index(target_name)
+        except ValueError:
+            log.debug("Player not found in popup list: %s", desired_order[pick_index])
+            continue
+
+        if pos == 0 and pick_index == 0:
+            break
+
+        _select_player_at(pos)
+        time.sleep(0.1)
+        _move_to_top()
+        time.sleep(0.1)
+
+        if (step + 1) % 25 == 0:
+            log.info("Reorder progress: %d / %d", step + 1, total)
 
 
 def open_rank_players_popup(driver: webdriver.Chrome) -> None:
@@ -585,7 +672,7 @@ def open_rank_players_popup(driver: webdriver.Chrome) -> None:
 
 
 def save_rank_players_popup(driver: webdriver.Chrome) -> None:
-    """Click Save in the Rank Players popup."""
+    """Click Save in the Rank Players popup, then accept the confirmation dialog."""
     for by, sel in [
         (By.CSS_SELECTOR, "input[value='Save']"),
         (By.XPATH, "//input[@value='Save']"),
@@ -595,11 +682,37 @@ def save_rank_players_popup(driver: webdriver.Chrome) -> None:
         try:
             btn = driver.find_element(by, sel)
             btn.click()
-            time.sleep(0.5)
-            return
+            log.info("Clicked Save button.")
+            break
         except Exception:
             continue
-    raise RuntimeError("Could not find 'Save' button in popup.")
+    else:
+        raise RuntimeError("Could not find 'Save' button in popup.")
+
+    # Handle "Are you sure you want to commit your changes?" confirmation dialog
+    time.sleep(1)
+    try:
+        alert = driver.switch_to.alert
+        log.info("Confirmation dialog: %s", alert.text)
+        alert.accept()
+        log.info("Accepted confirmation dialog.")
+    except Exception:
+        # May be an HTML dialog instead of a JS alert — try clicking OK button
+        for by, sel in [
+            (By.XPATH, "//button[normalize-space(.)='OK']"),
+            (By.XPATH, "//input[@value='OK']"),
+            (By.XPATH, "//button[contains(.,'OK')]"),
+            (By.XPATH, "//a[normalize-space(.)='OK']"),
+        ]:
+            try:
+                ok_btn = driver.find_element(by, sel)
+                if ok_btn.is_displayed():
+                    ok_btn.click()
+                    log.info("Clicked OK on confirmation dialog.")
+                    break
+            except Exception:
+                continue
+    time.sleep(1)
 
 
 def _try_auto_login(driver: webdriver.Chrome) -> bool:

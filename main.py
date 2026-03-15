@@ -13,11 +13,17 @@ from pathlib import Path
 
 # Template in project root; override by passing a path as first argument.
 DEFAULT_TEMPLATE = Path(__file__).resolve().parent / "Season x amateur draft-template.xlsx"
+OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 
-# No default profile: script opens a separate Chrome window so you don't have to close your main Chrome.
-# To reuse an existing login, use a dedicated profile: --chrome-profile "%LOCALAPPDATA%\Google\Chrome\User Data\Automation"
-# (create "Automation" in Chrome's profile list, log in to HBD once there, close that Chrome before running).
 DEFAULT_CHROME_PROFILE = None
+
+
+def _latest_output() -> Path | None:
+    """Return the most recently modified .xlsx file in the outputs folder, or None."""
+    if not OUTPUTS_DIR.is_dir():
+        return None
+    files = sorted(OUTPUTS_DIR.glob("*.xlsx"), key=lambda f: f.stat().st_mtime, reverse=True)
+    return files[0] if files else None
 
 
 def main() -> None:
@@ -28,8 +34,9 @@ def main() -> None:
         "excel_file",
         type=Path,
         nargs="?",
-        default=DEFAULT_TEMPLATE,
-        help=f"Path to draft Excel template (default: {DEFAULT_TEMPLATE.name} in project root)",
+        default=None,
+        help="Path to Excel file. fetch: template (default: template in project root). "
+             "apply-order: output file (default: latest file in outputs/).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -76,17 +83,32 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    excel_path = args.excel_file.resolve()
+
+    if args.excel_file is not None:
+        excel_path = args.excel_file.resolve()
+    elif args.command == "apply-order":
+        latest = _latest_output()
+        if latest:
+            excel_path = latest
+            print(f"Using latest output: {excel_path.name}")
+        else:
+            print("No output files found in outputs/. Run 'fetch' first or specify a file.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        excel_path = DEFAULT_TEMPLATE
+
     if not excel_path.exists():
         print(f"Excel file not found: {excel_path}", file=sys.stderr)
         sys.exit(1)
+
     from excel_draft import validate_template
-    validation = validate_template(excel_path)
-    if validation:
-        print("Template validation failed:", file=sys.stderr)
-        for msg in validation:
-            print(f"  - {msg}", file=sys.stderr)
-        sys.exit(1)
+    if args.command == "fetch":
+        validation = validate_template(excel_path)
+        if validation:
+            print("Template validation failed:", file=sys.stderr)
+            for msg in validation:
+                print(f"  - {msg}", file=sys.stderr)
+            sys.exit(1)
 
     from web_draft import run_sync_from_web_to_excel, run_apply_excel_order_to_web
     from credentials import get_headless

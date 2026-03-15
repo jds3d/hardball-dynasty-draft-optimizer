@@ -2,11 +2,154 @@
 Excel read/write for Hardball Dynasty amateur draft.
 Maps between workbook sheets (Hitters, Pitchers) and draft order.
 """
+import logging
+import re
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 import pandas as pd
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Lightweight Excel formula evaluator
+# ---------------------------------------------------------------------------
+# Handles the subset of Excel needed for typical Overall Projection formulas:
+#   cell refs (A1, $A$1), ranges (H$1:P$1), SUMPRODUCT, SUM, ABS,
+#   arithmetic (+, -, *, /, ^), parentheses, and numeric literals.
+#   Formula cells are evaluated recursively (depth-limited).
+# ---------------------------------------------------------------------------
+_EVAL_MAX_DEPTH = 5
+
+
+def _col_letter_to_num(col: str) -> int:
+    n = 0
+    for c in col.upper():
+        n = n * 26 + (ord(c) - 64)
+    return n
+
+
+def _get_cell_as_float(ws, row: int, col: int, depth: int = 0) -> float:
+    val = ws.cell(row, col).value
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if s.startswith("=") and depth < _EVAL_MAX_DEPTH:
+        result = _eval_xl(ws, s[1:], depth + 1)
+        return result if result is not None else 0.0
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _resolve_range(ws, range_str: str, depth: int = 0) -> list[float]:
+    parts = range_str.strip().split(":")
+    if len(parts) != 2:
+        return []
+    m1 = re.match(r"\$?([A-Z]+)\$?(\d+)", parts[0].strip())
+    m2 = re.match(r"\$?([A-Z]+)\$?(\d+)", parts[1].strip())
+    if not m1 or not m2:
+        return []
+    c1, r1 = _col_letter_to_num(m1.group(1)), int(m1.group(2))
+    c2, r2 = _col_letter_to_num(m2.group(1)), int(m2.group(2))
+    vals: list[float] = []
+    if r1 == r2:
+        for c in range(c1, c2 + 1):
+            vals.append(_get_cell_as_float(ws, r1, c, depth))
+    elif c1 == c2:
+        for r in range(r1, r2 + 1):
+            vals.append(_get_cell_as_float(ws, r, c1, depth))
+    return vals
+
+
+def _eval_xl(ws, expr: str, depth: int = 0) -> float | None:
+    """Evaluate simplified Excel expression. Returns None on failure."""
+    if depth > _EVAL_MAX_DEPTH:
+        return None
+
+    # SUMPRODUCT(range, range, ...)
+    def _sp(m):
+        args = [a.strip() for a in m.group(1).split(",")]
+        ranges = [_resolve_range(ws, a, depth) for a in args]
+        if not ranges or any(len(r) != len(ranges[0]) for r in ranges):
+            return "0"
+        total = 0.0
+        for i in range(len(ranges[0])):
+            p = 1.0
+            for r in ranges:
+                p *= r[i]
+            total += p
+        return str(total)
+
+    expr = re.sub(r"SUMPRODUCT\(([^)]+)\)", _sp, expr, flags=re.IGNORECASE)
+
+    # SUM(range_or_values)
+    def _sm(m):
+        inner = m.group(1).strip()
+        parts = [p.strip() for p in inner.split(",")]
+        total = 0.0
+        for p in parts:
+            if ":" in p:
+                total += sum(_resolve_range(ws, p, depth))
+            else:
+                ref = re.match(r"\$?([A-Z]+)\$?(\d+)$", p)
+                if ref:
+                    total += _get_cell_as_float(
+                        ws, int(ref.group(2)), _col_letter_to_num(ref.group(1)), depth
+                    )
+                else:
+                    try:
+                        total += float(p)
+                    except ValueError:
+                        pass
+        return str(total)
+
+    expr = re.sub(r"SUM\(([^)]+)\)", _sm, expr, flags=re.IGNORECASE)
+
+    # ABS(expr)
+    def _ab(m):
+        inner = m.group(1).strip()
+        try:
+            return str(abs(float(inner)))
+        except ValueError:
+            return "0"
+
+    expr = re.sub(r"ABS\(([^)]+)\)", _ab, expr, flags=re.IGNORECASE)
+
+    # Replace remaining cell references with numeric values
+    def _cr(m):
+        col = m.group(1)
+        row = int(m.group(2))
+        return str(_get_cell_as_float(ws, row, _col_letter_to_num(col), depth))
+
+    expr = re.sub(r"\$?([A-Z]+)\$?(\d+)", _cr, expr)
+
+    expr = expr.replace("^", "**")
+
+    try:
+        return float(eval(expr))
+    except Exception:
+        return None
+
+
+def _compute_projection(ws, data_row: int) -> float | None:
+    """Evaluate the Overall Projection formula in column A for the given data row."""
+    val = ws.cell(data_row, 1).value
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if not s.startswith("="):
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return _eval_xl(ws, s[1:])
 
 
 # Sheet names and header row indices (1-based in Excel)
@@ -157,17 +300,33 @@ def validate_template(path: str | Path) -> list[str]:
 
 def get_draft_order_from_excel(path: str | Path) -> list[str]:
     """
-    Read draft order from Excel: Hitters and Pitchers interleaved and ranked by score
-    (Hitters by 'total', Pitchers by 'Overall Projection'), highest score first.
-    Returns list of player names in that order.
+    Read draft order from the Master List sheet (already sorted by Adjusted Score).
+    Falls back to Hitters + Pitchers sheets sorted by Overall Projection if no Master List.
+    Returns list of player names in draft order.
     """
     path = Path(path)
     if not path.exists():
         return []
 
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    scored: list[tuple[float, str]] = []
 
+    # Prefer the Master List — it's already sorted by adjusted score
+    if MASTER_LIST_SHEET in wb.sheetnames:
+        ws = wb[MASTER_LIST_SHEET]
+        player_col = _header_to_col(ws, 1, "Player") or _header_to_col_ic(ws, 1, "Player")
+        if player_col:
+            names: list[str] = []
+            for row in range(2, ws.max_row + 1):
+                name = ws.cell(row, player_col).value
+                if name is None or not str(name).strip():
+                    continue
+                names.append(str(name).strip())
+            if names:
+                wb.close()
+                return names
+
+    # Fallback: read from Hitters + Pitchers, sort by Overall Projection
+    scored: list[tuple[float, str]] = []
     for sheet_name, header_row, score_col in [
         (HITTERS_SHEET, HITTERS_HEADER_ROW, HITTERS_SCORE_COL),
         (PITCHERS_SHEET, PITCHERS_HEADER_ROW, PITCHERS_SCORE_COL),
@@ -179,8 +338,7 @@ def get_draft_order_from_excel(path: str | Path) -> list[str]:
         score_col_idx = _header_to_col(ws, header_row, score_col) or _header_to_col_ic(ws, header_row, score_col)
         if player_col is None:
             continue
-        data_start = header_row + 1
-        for row in range(data_start, ws.max_row + 1):
+        for row in range(header_row + 1, ws.max_row + 1):
             name = ws.cell(row, player_col).value
             if name is None or not str(name).strip():
                 continue
@@ -188,7 +346,6 @@ def get_draft_order_from_excel(path: str | Path) -> list[str]:
             scored.append((score, str(name).strip()))
 
     wb.close()
-    # Sort by score descending (best first), then by name for ties
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [name for _, name in scored]
 
@@ -326,7 +483,7 @@ def _signability_factor(text: str, raw_overall: float = 0) -> float:
     if "probably won't sign" in t:
         return 0.05
     if "unknown" in t or "wasn't scouted" in t:
-        return 0.05
+        return 0.0
     return 0.50
 
 
@@ -351,6 +508,72 @@ def _write_background_sheet(
                 ws.cell(i + 2, col_idx, val)
 
 
+def _sort_master_list_via_excel(path: Path) -> bool:
+    """
+    Open the saved workbook in Excel via COM, recalculate all formulas,
+    sort the Master List by Adjusted Score (column A) descending,
+    delete rows where the Adjusted Score is an error (#VALUE!), and save.
+    Returns True on success.
+    """
+    try:
+        import win32com.client
+        import pythoncom
+    except ImportError:
+        log.info("pywin32 not installed; Master List sort requires: pip install pywin32")
+        return False
+
+    excel = None
+    try:
+        pythoncom.CoInitialize()
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        abs_path = str(path.resolve())
+        wb = excel.Workbooks.Open(abs_path)
+        excel.CalculateFull()
+
+        ws = wb.Sheets(MASTER_LIST_SHEET)
+        last_row = ws.Cells(ws.Rows.Count, 6).End(-4162).Row  # xlUp; col F = Player name
+
+        if last_row > 1:
+            # Sort by Adjusted Score descending (errors sink to the bottom)
+            sort_range = ws.Range(f"A1:J{last_row}")
+            sort_range.Sort(
+                Key1=ws.Range("A2"),
+                Order1=2,       # xlDescending
+                Header=1,       # xlYes
+                OrderCustom=1,
+                MatchCase=False,
+                Orientation=1,  # xlTopToBottom
+            )
+
+            # Delete rows from the bottom up where Adjusted Score is an error or non-numeric
+            deleted = 0
+            for r in range(last_row, 1, -1):
+                val = ws.Cells(r, 1).Value
+                if val is None or not isinstance(val, (int, float)) or val <= 0:
+                    ws.Rows(r).Delete()
+                    deleted += 1
+
+            log.info("Excel COM: sorted Master List (%d rows, removed %d error rows).",
+                     last_row - 1 - deleted, deleted)
+
+        wb.Save()
+        wb.Close()
+        excel.Quit()
+        pythoncom.CoUninitialize()
+        return True
+
+    except Exception as e:
+        log.warning("Excel COM sort failed: %s", e)
+        if excel:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+        return False
+
+
 def _write_master_list(
     wb: openpyxl.Workbook,
     hitters_rows: list[dict[str, Any]],
@@ -358,8 +581,9 @@ def _write_master_list(
 ) -> None:
     """
     Create a Master List tab with all players (hitters + pitchers).
-    Applies scouting trust penalty (college vs HS budget) AND signability penalty.
-    Sorted by final adjusted score descending.
+    Adjusted Score (col A) is an Excel formula: Overall Projection × Trust × Signability.
+    Initial row order uses raw Overall as a rough approximation; the caller should
+    follow up with _sort_master_list_via_excel() to get the real sort by formula values.
     """
     from credentials import get_scouting_config
 
@@ -389,7 +613,7 @@ def _write_master_list(
         scout_trust = trust_factors[category]
         sign_factor = _signability_factor(signability, raw)
         players.append({
-            "adjusted": raw * scout_trust * sign_factor,
+            "sort_key": raw * scout_trust * sign_factor,
             "raw": raw, "scout": scout_trust, "sign": sign_factor,
             "name": name, "pos": pos, "type": "Hitter", "cat": category,
             "sig": signability, "sheet": HITTERS_SHEET, "src_row": src_row,
@@ -407,14 +631,25 @@ def _write_master_list(
         scout_trust = trust_factors[category]
         sign_factor = _signability_factor(signability, raw)
         players.append({
-            "adjusted": raw * scout_trust * sign_factor,
+            "sort_key": raw * scout_trust * sign_factor,
             "raw": raw, "scout": scout_trust, "sign": sign_factor,
             "name": name, "pos": pos, "type": "Pitcher", "cat": category,
             "sig": signability, "sheet": PITCHERS_SHEET, "src_row": src_row,
         })
 
-    players.sort(key=lambda p: (-p["adjusted"], p["name"]))
+    players.sort(key=lambda p: (-p["sort_key"], p["name"]))
 
+    # Column layout:
+    #   A = Adjusted Score  (formula: B × D × E — always correct when opened in Excel)
+    #   B = Overall Projection  (formula referencing source sheet column A)
+    #   C = Raw Overall  (HBD's raw rating number)
+    #   D = Scouting Trust  (multiplier from scouting budget config)
+    #   E = Signability Factor  (multiplier from signability text)
+    #   F = Player
+    #   G = Pos
+    #   H = Type  (Hitter / Pitcher)
+    #   I = Category  (college / high_school)
+    #   J = Signability  (raw text from Background Info)
     headers = [
         "Adjusted Score", "Overall Projection", "Raw Overall",
         "Scouting Trust", "Signability Factor",
@@ -425,7 +660,7 @@ def _write_master_list(
 
     for i, p in enumerate(players):
         r = i + 2
-        ws.cell(r, 1, round(p["adjusted"], 2))
+        ws.cell(r, 1, f"=B{r}*D{r}*E{r}")
         ws.cell(r, 2, f"='{p['sheet']}'!A{p['src_row']}")
         ws.cell(r, 3, p["raw"])
         ws.cell(r, 4, round(p["scout"], 3))
@@ -446,19 +681,28 @@ def write_draft_data_to_excel(
 ) -> None:
     """
     Write scraped draft pool data into the Excel file.
-    Hitters sheet: fixed layout (hitting block B–P, fielding block Q+).
-    Pitchers sheet: fixed layout (single block B–T).
-    Background Info tab: all players' background data (signability, school, class).
-    Master List tab: all players sorted by adjusted score (scouting + signability penalties).
+
+    Flow:
+      1. Write Hitters, Pitchers, Background Info, and Master List sheets via openpyxl.
+         The Master List's Adjusted Score is a formula (=B*D*E) so it can only be
+         evaluated by Excel; initial row order is an approximation (raw Overall).
+      2. Save the workbook.
+      3. Open the saved file in Excel via COM, recalculate all formulas, sort the
+         Master List by Adjusted Score descending, and save.  Players whose
+         Overall Projection is a #VALUE! error end up at the bottom automatically.
+
+    If Excel COM is unavailable the file is still valid — formulas compute when
+    the user opens it in Excel, and they can sort manually.
     """
     path = Path(path)
+    save_to = Path(output_path) if output_path else path
+    save_to.parent.mkdir(parents=True, exist_ok=True)
+
     wb = openpyxl.load_workbook(path)
 
-    # Hitters: fixed column layout so output matches template
     if HITTERS_SHEET in wb.sheetnames and hitters_rows:
         _write_hitters_sheet_fixed(wb[HITTERS_SHEET], HITTERS_HEADER_ROW, hitters_rows)
 
-    # Pitchers: always write headers; write data if we have rows
     if PITCHERS_SHEET in wb.sheetnames:
         ws = wb[PITCHERS_SHEET]
         for col_idx, header_label, keys in PITCHERS_LAYOUT:
@@ -468,17 +712,34 @@ def write_draft_data_to_excel(
                 if val is not None:
                     ws.cell(PITCHERS_HEADER_ROW + 1 + i, col_idx, val)
 
-    # Background Info tab
+    # Wrap column-A formulas with IFERROR so errors show 0 instead of #VALUE!
+    for sheet_name, header_row, n_rows in [
+        (HITTERS_SHEET, HITTERS_HEADER_ROW, len(hitters_rows)),
+        (PITCHERS_SHEET, PITCHERS_HEADER_ROW, len(pitchers_rows)),
+    ]:
+        if sheet_name in wb.sheetnames and n_rows:
+            ws = wb[sheet_name]
+            for r in range(header_row + 1, header_row + 1 + n_rows):
+                cell = ws.cell(r, 1)
+                v = cell.value
+                if v and str(v).startswith("=") and not str(v).upper().startswith("=IFERROR"):
+                    cell.value = f"=IFERROR({str(v)[1:]},0)"
+
     if background_rows:
         _write_background_sheet(wb, background_rows)
 
-    # Master List: all players sorted by adjusted score (scouting trust × signability factor)
     _write_master_list(wb, hitters_rows, pitchers_rows)
 
-    save_to = Path(output_path) if output_path else path
-    save_to.parent.mkdir(parents=True, exist_ok=True)
     wb.save(save_to)
     wb.close()
+    log.info("Saved workbook: %s", save_to)
+
+    # Let Excel recalculate formulas and sort the Master List by Adjusted Score.
+    if _sort_master_list_via_excel(save_to):
+        log.info("Master List sorted by Adjusted Score via Excel.")
+    else:
+        log.warning("Excel COM sort unavailable; open the file in Excel and sort "
+                     "Master List by column A descending.")
 
 
 def append_draft_order_sheet(path: str | Path, order: list[str], sheet_name: str = "DraftOrder") -> None:
