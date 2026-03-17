@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 
-CREDENTIALS_FILE = Path(__file__).resolve().parent / "credentials.env"
-CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+from app_dir import get_app_dir
+
+CREDENTIALS_FILE = get_app_dir() / "credentials.env"
+CONFIG_FILE = get_app_dir() / "config.json"
 
 
 def _load_env_file() -> dict[str, str]:

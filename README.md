@@ -42,9 +42,9 @@ Automate your [WhatIfSports Hardball Dynasty](https://www.whatifsports.com/hbd/)
 
 ## Commands
 
-### `fetch` — Scrape the draft pool into Excel
+### `fetch` — Pull draft pool data from the site
 
-Pulls all prospect data from the Amateur Draft Player Pool page across four views (Hitting, Fielding/General, Pitching, Background Info), merges them, and writes the result to a timestamped file in `outputs/`.
+Pulls all prospect data from the Amateur Draft Player Pool page across four views (Hitting, Fielding/General, Pitching, Background Info), merges them, and writes the result to a timestamped file in `outputs/`. Does not sort the Master List; that happens in `apply-order`.
 
 ```bash
 python main.py fetch
@@ -60,27 +60,56 @@ python main.py "path/to/template.xlsx" fetch
 
 The template is never modified. Output is saved as `outputs/Season N amateur draft YYYY-MM-DD_HH-MM-SS.xlsx`.
 
-### `apply-order` — Push your draft order to the site
+### `apply-order` — Reapply formula, sort Master List, then optionally push to the site
 
-Reads the ranked player list from your Excel's **Master List** sheet (or falls back to Hitters + Pitchers sorted by Overall Projection), opens the Rank Players popup on the site, reorders it to match, and saves.
+1. Reapplies the configured formula and sorts the **Master List** by Adjusted Score (via Excel COM on Windows).
+2. Prompts: **Push this order to Hardball Dynasty?** — if you say yes (or use `--push`), opens the Rank Players popup and reorders it to match your Excel, then saves.
 
 ```bash
 python main.py apply-order                          # uses latest file in outputs/
+python main.py apply-order --push                   # sort and push without prompting
 python main.py "outputs/Season 30 amateur draft 2026-03-14_20-52-50.xlsx" apply-order
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--push` | off | Push to web after sorting (skip the prompt) |
 | `--headless` | off | Run Chrome without a visible window |
 | `--chrome-profile PATH` | none | Chrome user-data dir for saved login |
 
 If no file is specified, the most recently modified `.xlsx` in `outputs/` is used automatically.
 
+## GUI and executable
+
+A simple GUI runs the same workflow from buttons (no command line needed):
+
+```bash
+python gui_app.py
+```
+
+- **Fetch draft pool** — Opens the browser, scrapes the draft pool, and writes a timestamped Excel file to `outputs/`.
+- **Apply order** — Uses the latest file in `outputs/` (or lets you pick one), reapplies the formula and sorts the Master List, then asks whether to push that order to Hardball Dynasty (Rank Players).
+
+Log output appears in the window. You can still use `main.py` from the command line for scripts or automation.
+
+### Building a Windows executable
+
+1. Install PyInstaller: `pip install pyinstaller`
+2. From the project root, run: `build.bat` (or `pyinstaller --noconfirm hardball_draft.spec`)
+3. The executable is created at `dist/HardballDraftOptimizer.exe`.
+
+**Using the executable:** Place it in a folder alongside:
+- `credentials.env` (your login; copy from `credentials.env.example`)
+- `config.json` (game config; copy from `config.json.example`)
+- Your Excel template: `Season x amateur draft-template.xlsx`
+
+The first time you run Fetch, a browser window opens; log in to WhatIfSports if prompted. The app will create an `outputs` folder next to the exe for the generated Excel files. You can override the bundled `algorithm.json` by placing your own `algorithm.json` in the same folder as the exe.
+
 ## Workflow
 
-1. **Fetch** — Run `fetch` to populate your template with the current draft pool.
-2. **Review** — Open the output in Excel. The Master List is pre-sorted by Adjusted Score. Tweak your template formulas or re-run fetch as needed.
-3. **Apply** — Run `apply-order` to push the Master List order to the site's Rank Players list.
+1. **Fetch** — Run `fetch` to pull the draft pool from the site into Excel (data only; Master List is written but not sorted).
+2. **Review** — Open the output in Excel. Tweak your template formulas or re-run fetch as needed.
+3. **Apply order** — Run `apply-order` to recalculate formulas and sort the Master List by Adjusted Score, then choose whether to push that order to the site's Rank Players list.
 
 ## Excel Sheet Layout
 
@@ -121,7 +150,7 @@ If no file is specified, the most recently modified `.xlsx` in `outputs/` is use
 | I | Category (college / high_school) |
 | J | Signability (raw text) |
 
-The Master List is sorted by Adjusted Score descending. Players with a zero score (unscouted, formula errors) are excluded.
+The Master List is sorted by Adjusted Score descending when you run **apply-order** (Excel COM recalculates and sorts). Players with a zero score (unscouted, formula errors) are excluded.
 
 ### Background Info (auto-generated)
 
@@ -313,5 +342,5 @@ hardball-dynasty-draft-optimizer/
 - **Login:** The draft page requires a logged-in session. Run without `--headless` at least once and log in when the browser opens, or use `--chrome-profile` with a profile that's already logged in (close that profile's Chrome window first).
 - **"Could not find draft prospects table":** The site's HTML may have changed. Check `web_draft.py` selectors (e.g. `table#dgPlayers`, button XPaths).
 - **`#VALUE!` errors in Excel:** Column A formulas are automatically wrapped with `IFERROR(..., 0)` so errors display as 0 rather than `#VALUE!`.
-- **Master List not sorted:** On Windows, the script uses Excel COM automation (`pywin32`) to recalculate formulas and sort. If `pywin32` is unavailable, open the file in Excel and sort the Master List by column A descending manually.
+- **Master List not sorted:** Run `apply-order` to recalculate and sort (uses Excel COM on Windows). If `pywin32` is unavailable, open the file in Excel and sort the Master List by column A descending manually.
 - **Slow apply-order:** The script uses JavaScript to reorder the Rank Players list instantly. If JS reorder fails, it falls back to button-clicking (slower but still works).

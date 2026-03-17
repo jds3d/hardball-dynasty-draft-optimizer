@@ -10,6 +10,8 @@ from typing import Any
 import openpyxl
 import pandas as pd
 
+from app_dir import get_algorithm_file
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -230,7 +232,7 @@ FIELDING_HEADERS: list[str] = [
 # Algorithm config: generate formulas from algorithm.json
 # (polynomial coefficients + all individual/group weights)
 # ---------------------------------------------------------------------------
-ALGORITHM_FILE = Path(__file__).resolve().parent / "algorithm.json"
+ALGORITHM_FILE = get_algorithm_file()
 ALGORITHM_SHEET = "Algorithm"
 
 # Rating name → Excel column letter for each sheet (fixed by template layout).
@@ -934,19 +936,14 @@ def write_draft_data_to_excel(
     output_path: str | Path | None = None,
 ) -> None:
     """
-    Write scraped draft pool data into the Excel file.
+    Write scraped draft pool data into the Excel file (fetch = pull data only).
+    Does not sort the Master List; that is done in apply-order.
 
     Flow:
       1. Write Hitters, Pitchers, Background Info, and Master List sheets via openpyxl.
-         The Master List's Adjusted Score is a formula (=B*D*E) so it can only be
-         evaluated by Excel; initial row order is an approximation (raw Overall).
+         The Master List's Adjusted Score is a formula (=B*D*E); initial row order
+         is an approximation (raw Overall). Sort happens later in apply-order.
       2. Save the workbook.
-      3. Open the saved file in Excel via COM, recalculate all formulas, sort the
-         Master List by Adjusted Score descending, and save.  Players whose
-         Overall Projection is a #VALUE! error end up at the bottom automatically.
-
-    If Excel COM is unavailable the file is still valid — formulas compute when
-    the user opens it in Excel, and they can sort manually.
     """
     path = Path(path)
     save_to = Path(output_path) if output_path else path
@@ -993,12 +990,20 @@ def write_draft_data_to_excel(
     wb.close()
     log.info("Saved workbook: %s", save_to)
 
-    # Let Excel recalculate formulas and sort the Master List by Adjusted Score.
-    if _sort_master_list_via_excel(save_to):
-        log.info("Master List sorted by Adjusted Score via Excel.")
-    else:
-        log.warning("Excel COM sort unavailable; open the file in Excel and sort "
-                     "Master List by column A descending.")
+    # Sort is done in apply-order, not during fetch.
+
+
+def reapply_formula_and_sort_master_list(path: str | Path) -> bool:
+    """
+    Open the workbook in Excel via COM, recalculate all formulas, and sort the
+    Master List by Adjusted Score descending. Call this from apply-order before
+    optionally pushing to the web. Returns True if sort succeeded.
+    """
+    path = Path(path)
+    if not path.exists():
+        log.warning("File not found: %s", path)
+        return False
+    return _sort_master_list_via_excel(path)
 
 
 def append_draft_order_sheet(path: str | Path, order: list[str], sheet_name: str = "DraftOrder") -> None:

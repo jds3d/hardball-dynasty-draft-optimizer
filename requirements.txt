@@ -3,3 +3,4 @@ openpyxl>=3.1.0
 pandas>=2.0.0
 webdriver-manager>=4.0.0
 pywin32>=306
+pyinstaller

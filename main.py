@@ -11,9 +11,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from app_dir import get_app_dir
+
 # Template in project root; override by passing a path as first argument.
-DEFAULT_TEMPLATE = Path(__file__).resolve().parent / "Season x amateur draft-template.xlsx"
-OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
+DEFAULT_TEMPLATE = get_app_dir() / "Season x amateur draft-template.xlsx"
+OUTPUTS_DIR = get_app_dir() / "outputs"
 
 DEFAULT_CHROME_PROFILE = None
 
@@ -69,11 +71,12 @@ def main() -> None:
         help="Chrome user data dir for saved login (optional). Without this, a new window opens; log in there when prompted.",
     )
 
-    # Apply Excel order TO web (Rank Players popup)
+    # Apply order: reapply formula, sort Master List, then optionally push to web
     p_apply = sub.add_parser(
         "apply-order",
-        help="Open Rank Players popup and reorder list to match Excel (Hitters then Pitchers sheet order)",
+        help="Reapply configured formula, sort Master List by adjusted score, then optionally push order to Hardball Dynasty",
     )
+    p_apply.add_argument("--push", action="store_true", help="Push order to web after sorting (otherwise only sort and ask)")
     p_apply.add_argument("--headless", action="store_true", help="Run browser headless")
     p_apply.add_argument(
         "--chrome-profile",
@@ -111,6 +114,7 @@ def main() -> None:
             sys.exit(1)
 
     from web_draft import run_sync_from_web_to_excel, run_apply_excel_order_to_web
+    from excel_draft import reapply_formula_and_sort_master_list
     from credentials import get_headless
 
     headless = getattr(args, "headless", False) or get_headless()
@@ -125,12 +129,27 @@ def main() -> None:
             output_dir=str(args.output_dir) if getattr(args, "output_dir", None) else "outputs",
         )
     elif args.command == "apply-order":
-        profile = str(args.chrome_profile) if getattr(args, "chrome_profile") and args.chrome_profile else None
-        run_apply_excel_order_to_web(
-            str(excel_path),
-            headless=headless,
-            user_data_dir=profile,
-        )
+        sort_ok = reapply_formula_and_sort_master_list(excel_path)
+        if not sort_ok:
+            print("Could not sort Master List (Excel COM required on Windows). Open the file in Excel and sort by column A.", file=sys.stderr)
+            sys.exit(1)
+        print("Master list updated (formula recalculated and sorted by adjusted score).")
+        do_push = getattr(args, "push", False)
+        if not do_push:
+            try:
+                reply = input("Push this order to Hardball Dynasty? [y/N]: ").strip().lower()
+                do_push = reply in ("y", "yes")
+            except (EOFError, KeyboardInterrupt):
+                do_push = False
+        if do_push:
+            profile = str(args.chrome_profile) if getattr(args, "chrome_profile") and args.chrome_profile else None
+            run_apply_excel_order_to_web(
+                str(excel_path),
+                headless=headless,
+                user_data_dir=profile,
+            )
+        else:
+            print("Skipped pushing to web.")
     else:
         parser.print_help()
         sys.exit(1)
