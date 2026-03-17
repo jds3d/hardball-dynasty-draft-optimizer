@@ -365,6 +365,66 @@ def _write_weights_to_sheet(
                     ws.cell(catcher_row, _col_letter_to_idx(col), float(rweight))
 
 
+def _weighted_poly_with_overrides(
+    row: int,
+    gdef: dict,
+    col_map: dict[str, str],
+    weight_row: int,
+    coeff: dict,
+) -> str:
+    """Weighted polynomial sum using per-rating coefficient overrides when present."""
+    overrides = gdef.get("rating_overrides", {})
+    parts: list[str] = []
+    for rname, rweight in gdef.get("ratings", {}).items():
+        col = col_map.get(rname)
+        if not col:
+            continue
+        coeff_use = overrides.get(rname, coeff)
+        cell = f"{col}{row}"
+        weight_cell = f"{col}${weight_row}"
+        parts.append(f"{weight_cell}*({_poly(cell, coeff_use)})")
+    return "+".join(parts)
+
+
+def _build_penalty_formula(
+    row: int,
+    penalty_cfg: dict,
+    col_map: dict[str, str],
+    is_ref: bool,
+) -> str:
+    """Build penalty multiplier: proportional scale (with floor) or IF(OR(conditions), factor, 1). Returns '1' when is_ref."""
+    if is_ref:
+        return "1"
+    if penalty_cfg.get("type") == "proportional":
+        scale = penalty_cfg.get("scale", "1")
+        scale_replaced = scale
+        for rname, c in col_map.items():
+            scale_replaced = scale_replaced.replace(rname, f"{c}{row}")
+        floor = penalty_cfg.get("floor", 0)
+        return f"MAX({floor},{scale_replaced})"
+    # Binary penalty: IF(OR(conditions), factor, 1)
+    conds: list[str] = []
+    dura_lt = penalty_cfg.get("Durability_lt")
+    stam_lt = penalty_cfg.get("Stamina_lt")
+    if dura_lt is not None:
+        h = col_map.get("Durability", "H")
+        conds.append(f"{h}{row}<{dura_lt}")
+    if stam_lt is not None:
+        i = col_map.get("Stamina", "I")
+        conds.append(f"{i}{row}<{stam_lt}")
+    expr = penalty_cfg.get("expr")
+    expr_lt = penalty_cfg.get("expr_lt")
+    if expr is not None and expr_lt is not None:
+        replaced = expr
+        for rname, c in col_map.items():
+            replaced = replaced.replace(rname, f"{c}{row}")
+        conds.append(f"{replaced}<{expr_lt}")
+    if not conds:
+        return "1"
+    factor = penalty_cfg.get("factor", 0.05)
+    return f"IF(OR({','.join(conds)}),{factor},1)"
+
+
 def _generate_group_formula(
     row: int,
     gdef: dict,
@@ -379,7 +439,10 @@ def _generate_group_formula(
     refs = _build_rating_refs(gdef.get("ratings", {}), col_map, weight_row)
 
     if method == "polynomial":
-        expr = _weighted_poly(row, refs, coeff)
+        if gdef.get("rating_overrides"):
+            expr = _weighted_poly_with_overrides(row, gdef, col_map, weight_row, coeff)
+        else:
+            expr = _weighted_poly(row, refs, coeff)
     else:
         expr = _simple_weighted(row, refs)
 
@@ -393,9 +456,18 @@ def _generate_group_formula(
         cond_col = col_map.get(gdef.get("catcher_condition", "Pitch Calling"), "AA")
         threshold = int(gdef.get("catcher_threshold", 50))
         cond_op = ">" if is_ref else "<"
-        return f"=IF({cond_col}{row}{cond_op}{threshold},{expr},{catcher_expr})"
+        result = f"=IF({cond_col}{row}{cond_op}{threshold},{expr},{catcher_expr})"
+    else:
+        result = f"={expr}"
 
-    return f"={expr}"
+    penalty_cfg = gdef.get("penalty")
+    if penalty_cfg and not is_ref:
+        penalty_expr = _build_penalty_formula(row, penalty_cfg, col_map, is_ref)
+        if penalty_expr != "1":
+            inner = result.lstrip("=")
+            result = f"=({inner})*({penalty_expr})"
+
+    return result
 
 
 def _generate_col_a(
@@ -934,16 +1006,16 @@ def write_draft_data_to_excel(
     pitchers_rows: list[dict[str, Any]],
     background_rows: list[dict[str, Any]] | None = None,
     output_path: str | Path | None = None,
+    data_only: bool = False,
 ) -> None:
     """
-    Write scraped draft pool data into the Excel file (fetch = pull data only).
-    Does not sort the Master List; that is done in apply-order.
+    Write scraped draft pool data into the Excel file.
 
-    Flow:
-      1. Write Hitters, Pitchers, Background Info, and Master List sheets via openpyxl.
-         The Master List's Adjusted Score is a formula (=B*D*E); initial row order
-         is an approximation (raw Overall). Sort happens later in apply-order.
-      2. Save the workbook.
+    If data_only=True (fetch): only write Hitters, Pitchers, and Background Info.
+    Algorithm formulas and Master List are applied later when you run apply-order.
+
+    If data_only=False: write data + algorithm formulas + Master List (legacy;
+    prefer data_only=True and apply-order for algorithm/sort).
     """
     path = Path(path)
     save_to = Path(output_path) if output_path else path
@@ -963,15 +1035,133 @@ def write_draft_data_to_excel(
                 if val is not None:
                     ws.cell(PITCHERS_HEADER_ROW + 1 + i, col_idx, val)
 
-    # Generate column-A formulas from algorithm.json (if present)
-    algo = _load_algorithm_config()
-    if algo:
-        _apply_algorithm_formulas(wb, algo, len(hitters_rows), len(pitchers_rows))
+    if background_rows:
+        _write_background_sheet(wb, background_rows)
 
-    # Wrap column-A formulas with IFERROR so errors show 0 instead of #VALUE!
+    if not data_only:
+        algo = _load_algorithm_config()
+        if algo:
+            _apply_algorithm_formulas(wb, algo, len(hitters_rows), len(pitchers_rows))
+        for sheet_name, header_row, n_rows in [
+            (HITTERS_SHEET, HITTERS_HEADER_ROW, len(hitters_rows)),
+            (PITCHERS_SHEET, PITCHERS_HEADER_ROW, len(pitchers_rows)),
+        ]:
+            if sheet_name in wb.sheetnames and n_rows:
+                ws = wb[sheet_name]
+                for r in range(header_row + 1, header_row + 1 + n_rows):
+                    cell = ws.cell(r, 1)
+                    v = cell.value
+                    if v and str(v).startswith("=") and not str(v).upper().startswith("=IFERROR"):
+                        cell.value = f"=IFERROR({str(v)[1:]},0)"
+        _write_master_list(wb, hitters_rows, pitchers_rows)
+
+    wb.save(save_to)
+    wb.close()
+    log.info("Saved workbook: %s", save_to)
+
+
+def _read_background_from_workbook(wb: openpyxl.Workbook) -> dict[str, dict[str, Any]]:
+    """Read Background Info sheet into a map: normalized player name -> {Class, Signability}."""
+    result: dict[str, dict[str, Any]] = {}
+    if BACKGROUND_SHEET not in wb.sheetnames:
+        return result
+    ws = wb[BACKGROUND_SHEET]
+    # Row 1 = headers: Rnk, Player, Pos, B, T, Age, Hometown, School, Class, Signability
+    player_col = 2
+    class_col = 9
+    sign_col = 10
+    for r in range(2, ws.max_row + 1):
+        name = ws.cell(r, player_col).value
+        if name is None or not str(name).strip():
+            continue
+        key = _normalize_name(str(name))
+        result[key] = {
+            "Class": ws.cell(r, class_col).value or "",
+            "Signability": ws.cell(r, sign_col).value or "",
+        }
+    return result
+
+
+def _read_hitters_from_workbook(wb: openpyxl.Workbook) -> list[dict[str, Any]]:
+    """Read Hitters sheet into list of row dicts (keys expected by _write_master_list)."""
+    rows: list[dict[str, Any]] = []
+    if HITTERS_SHEET not in wb.sheetnames:
+        return rows
+    ws = wb[HITTERS_SHEET]
+    background = _read_background_from_workbook(wb)
+    # Hitting block: col 3=Player, 4=Pos, 7=Age, 16=Overall (Rating_15)
+    for r in range(HITTERS_HEADER_ROW + 1, ws.max_row + 1):
+        name_val = ws.cell(r, 3).value
+        if name_val is None or not str(name_val).strip():
+            continue
+        name = str(name_val).strip()
+        key = _normalize_name(name)
+        bg = background.get(key, {})
+        rows.append({
+            "Rating_2": name,
+            "Rating_3": ws.cell(r, 4).value,
+            "Rating_6": ws.cell(r, 7).value,
+            "Rating_15": ws.cell(r, 16).value,
+            "Class": bg.get("Class", ""),
+            "Signability": bg.get("Signability", ""),
+        })
+    return rows
+
+
+def _read_pitchers_from_workbook(wb: openpyxl.Workbook) -> list[dict[str, Any]]:
+    """Read Pitchers sheet into list of row dicts (keys expected by _write_master_list)."""
+    rows: list[dict[str, Any]] = []
+    if PITCHERS_SHEET not in wb.sheetnames:
+        return rows
+    ws = wb[PITCHERS_SHEET]
+    background = _read_background_from_workbook(wb)
+    # PITCHERS_LAYOUT: col 3=Player, 4=Pos, 7=Age, 20=Overall (Rating_19)
+    for r in range(PITCHERS_HEADER_ROW + 1, ws.max_row + 1):
+        name_val = ws.cell(r, 3).value
+        if name_val is None or not str(name_val).strip():
+            continue
+        name = str(name_val).strip()
+        key = _normalize_name(name)
+        bg = background.get(key, {})
+        rows.append({
+            "Rating_2": name,
+            "Rating_3": ws.cell(r, 4).value,
+            "Rating_6": ws.cell(r, 7).value,
+            "Rating_19": ws.cell(r, 20).value,
+            "Class": bg.get("Class", ""),
+            "Signability": bg.get("Signability", ""),
+        })
+    return rows
+
+
+def apply_algorithm_to_workbook(path: str | Path) -> bool:
+    """
+    Apply algorithm (formulas, penalties, Control override), write Master List, and sort.
+    Call this when running apply-order / Sort master list. Reads the workbook, applies
+    algorithm.json, then sorts via Excel COM. Returns True on success.
+    """
+    path = Path(path)
+    if not path.exists():
+        log.warning("File not found: %s", path)
+        return False
+    wb = openpyxl.load_workbook(path)
+    hitters_rows = _read_hitters_from_workbook(wb)
+    pitchers_rows = _read_pitchers_from_workbook(wb)
+    n_hitters = len(hitters_rows)
+    n_pitchers = len(pitchers_rows)
+    if n_hitters == 0 and n_pitchers == 0:
+        log.warning("No hitters or pitchers found in workbook.")
+        wb.close()
+        return False
+    algo = _load_algorithm_config()
+    if not algo:
+        log.warning("algorithm.json not found or invalid; cannot apply formulas.")
+        wb.close()
+        return False
+    _apply_algorithm_formulas(wb, algo, n_hitters, n_pitchers)
     for sheet_name, header_row, n_rows in [
-        (HITTERS_SHEET, HITTERS_HEADER_ROW, len(hitters_rows)),
-        (PITCHERS_SHEET, PITCHERS_HEADER_ROW, len(pitchers_rows)),
+        (HITTERS_SHEET, HITTERS_HEADER_ROW, n_hitters),
+        (PITCHERS_SHEET, PITCHERS_HEADER_ROW, n_pitchers),
     ]:
         if sheet_name in wb.sheetnames and n_rows:
             ws = wb[sheet_name]
@@ -980,30 +1170,20 @@ def write_draft_data_to_excel(
                 v = cell.value
                 if v and str(v).startswith("=") and not str(v).upper().startswith("=IFERROR"):
                     cell.value = f"=IFERROR({str(v)[1:]},0)"
-
-    if background_rows:
-        _write_background_sheet(wb, background_rows)
-
     _write_master_list(wb, hitters_rows, pitchers_rows)
-
-    wb.save(save_to)
+    wb.save(path)
     wb.close()
-    log.info("Saved workbook: %s", save_to)
-
-    # Sort is done in apply-order, not during fetch.
+    log.info("Applied algorithm and Master List to %s", path)
+    return _sort_master_list_via_excel(path)
 
 
 def reapply_formula_and_sort_master_list(path: str | Path) -> bool:
     """
-    Open the workbook in Excel via COM, recalculate all formulas, and sort the
-    Master List by Adjusted Score descending. Call this from apply-order before
-    optionally pushing to the web. Returns True if sort succeeded.
+    Apply algorithm (formulas, penalties, Control override), write Master List,
+    and sort by Adjusted Score via Excel COM. Call this from apply-order / Sort master list.
+    Returns True on success.
     """
-    path = Path(path)
-    if not path.exists():
-        log.warning("File not found: %s", path)
-        return False
-    return _sort_master_list_via_excel(path)
+    return apply_algorithm_to_workbook(path)
 
 
 def append_draft_order_sheet(path: str | Path, order: list[str], sheet_name: str = "DraftOrder") -> None:

@@ -77,6 +77,14 @@
                     "vsR": 1.5,
                     "Velocity": 0.2,
                     "GB/FB": 0.2
+                },
+                "rating_overrides": {
+                    "Control": {
+                        "a3": 0.000001,
+                        "a2": 0,
+                        "a1": 0,
+                        "a0": 0
+                    }
                 }
             },
             "pitches": {
@@ -96,6 +104,11 @@
                 "ratings": {
                     "Durability": 1.0,
                     "Stamina": 4.0
+                },
+                "penalty": {
+                    "type": "proportional",
+                    "scale": "MIN(1,(2*Stamina+Durability)/120)*MIN(1,Durability/10)*MIN(1,Stamina/10)",
+                    "floor": 0.05
                 }
             }
         }

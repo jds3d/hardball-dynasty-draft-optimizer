@@ -1022,7 +1022,9 @@ def run_sync_from_web_to_excel(
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         output_path = out_dir / f"Season {season_label} amateur draft {timestamp}.xlsx"
         log.info("Fetch: Writing to %s...", output_path)
-        write_draft_data_to_excel(excel_path, hitters, pitchers, background_rows=background, output_path=output_path)
+        write_draft_data_to_excel(
+            excel_path, hitters, pitchers, background_rows=background, output_path=output_path, data_only=True
+        )
         log.info("Fetch: Done. Wrote %s hitters and %s pitchers to %s", len(hitters), len(pitchers), output_path)
         print(f"Wrote {len(hitters)} hitters and {len(pitchers)} pitchers to {output_path}")
     finally:
