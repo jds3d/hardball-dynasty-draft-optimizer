@@ -6,3 +6,5 @@ __pycache__/
 credentials.env
 config.json
 .env
+build/
+dist/

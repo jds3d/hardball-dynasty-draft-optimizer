@@ -1,6 +1,6 @@
 # PyInstaller spec for Hardball Dynasty Draft Optimizer (GUI executable).
 # Build: pyinstaller hardball_draft.spec
-# Output: dist/HardballDraftOptimizer.exe (or dist\HardballDraftOptimizer.exe on Windows)
+# Output: HardballDraftOptimizer.exe in the project root when built with --distpath .
 
 import sys
 

@@ -96,8 +96,8 @@ Log output appears in the window. You can still use `main.py` from the command l
 ### Building a Windows executable
 
 1. Install PyInstaller: `pip install pyinstaller`
-2. From the project root, run: `build.bat` (or `pyinstaller --noconfirm hardball_draft.spec`)
-3. The executable is created at `dist/HardballDraftOptimizer.exe`.
+2. From the project root, run: `build.bat` (or `pyinstaller --noconfirm --distpath . hardball_draft.spec`)
+3. The executable is created at `HardballDraftOptimizer.exe` in the project root.
 
 **Using the executable:** Place it in a folder alongside:
 - `credentials.env` (your login; copy from `credentials.env.example`)
