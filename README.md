@@ -9,36 +9,170 @@ Automate your [WhatIfSports Hardball Dynasty](https://www.whatifsports.com/hbd/)
 - Applies that order to the site's Rank Players popup via Selenium (instant JavaScript reorder).
 - All penalty weights and formula constants are configurable in `config.json` and `algorithm.json`.
 
-## Setup
+## Setup (no Python or Git experience required)
 
-1. **Python 3.10+** and pip.
+This section assumes you are on **Windows** and have never used Git or Python before. You can use either the **ready-made program** (`HardballDraftOptimizer.exe` in the **project folder**, next to your template and config) or the **Python version** (optional).
 
-2. Create and activate a virtual environment, then install dependencies:
+### What you need
 
-   ```bash
+- A **WhatIfSports / Hardball Dynasty** account.
+- **Google Chrome** installed (the tool drives Chrome automatically).
+- The **Excel template** file that comes with this project: `Season x amateur draft-template.xlsx` (it must stay in the project; do not rename it unless you know what you are doing).
+
+---
+
+### Step 1 — Install Git (so you can download this project)
+
+Git is a common way to copy a project from the internet onto your computer and keep it up to date.
+
+1. Open your browser and go to: [https://git-scm.com/download/win](https://git-scm.com/download/win)
+2. Download **Git for Windows** and run the installer.
+3. When the installer asks questions, it is safe to leave the **default options** selected for a first-time setup.
+4. After installation, close and reopen **PowerShell** (or open **Git Bash** from the Start menu).
+
+To check that Git installed correctly, open PowerShell and type:
+
+```text
+git --version
+```
+
+You should see a version number (for example `git version 2.43.0.windows.1`). If you see an error, restart the computer and try again.
+
+---
+
+### Step 2 — Get a copy of this project on your computer
+
+Pick **one** of these methods.
+
+#### Option A — Using Git (recommended)
+
+1. On GitHub, open this repository and click the green **Code** button.
+2. Copy the **HTTPS** URL (it looks like `https://github.com/USERNAME/hardball-dynasty-draft-optimizer.git`).
+3. In PowerShell, go to a folder where you keep projects, for example:
+
+   ```powershell
+   cd $HOME\Documents
+   ```
+
+4. Clone the repository (paste your real URL):
+
+   ```powershell
+   git clone https://github.com/USERNAME/hardball-dynasty-draft-optimizer.git
+   cd hardball-dynasty-draft-optimizer
+   ```
+
+Later, to get updates, open PowerShell inside that folder and run:
+
+```powershell
+git pull
+```
+
+#### Option B — Without Git (download a ZIP)
+
+1. On GitHub, open this repository and click the green **Code** button.
+2. Choose **Download ZIP**.
+3. Unzip the folder somewhere easy to find, for example `Documents\hardball-dynasty-draft-optimizer`.
+
+You do **not** need Git if you use the ZIP, but you will have to download a fresh ZIP whenever you want updates.
+
+---
+
+### Step 3 — Add your login and game settings (everyone must do this)
+
+The program reads `credentials.env`, `config.json`, and the Excel template from **the same folder as the executable**. After you build (Step 4), that folder is the **project root**, so prepare these files there now.
+
+1. **Login file**
+   - In File Explorer, open the project folder.
+   - Find `credentials.env.example`.
+   - **Copy** it and rename the copy to `credentials.env` (remove `.example`).
+   - Open `credentials.env` in Notepad and fill in your WhatIfSports email and password using the same format as the example lines.  
+   - Never share this file or upload it to the internet. It is listed in `.gitignore` so Git will not commit it by mistake.
+
+2. **Game settings**
+   - Copy `config.json.example` and rename the copy to `config.json`.
+   - Open `config.json` in Notepad and adjust values if you want (defaults are fine to start).
+
+3. **Excel template**
+   - Keep `Season x amateur draft-template.xlsx` in the project. The tool uses it as the layout for Hitters and Pitchers. It must contain:
+     - A **Hitters** sheet (header row 6) with columns such as `Rnk`, `Player`, `Pos`, `B`, `T`, `Age`, plus rating columns. Column A is used for the overall projection once the algorithm is applied.
+     - A **Pitchers** sheet (header row 5) with the same kind of structure.
+
+---
+
+### Step 4 — Build the Windows program (creates `HardballDraftOptimizer.exe` in the project folder)
+
+You only need this if you were not given a pre-built `.exe`. This step **does** use Python once, on your machine, to create the program file.
+
+1. Install **Python 3.10 or newer** from [https://www.python.org/downloads/](https://www.python.org/downloads/).
+2. During installation, check the box **Add python.exe to PATH**, then finish the installer.
+3. Open **PowerShell** in the project folder (Shift+right-click in the folder background → “Open in Terminal” or “Open PowerShell window here”).
+4. Create a virtual environment and install dependencies:
+
+   ```powershell
    python -m venv .venv
-   .venv\Scripts\activate        # Windows
-   # source .venv/bin/activate   # macOS / Linux
+   .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
    ```
 
-3. **Google Chrome** must be installed. The script uses `webdriver-manager` to fetch a matching ChromeDriver automatically.
+   If PowerShell blocks the activate script, run once:  
+   `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
 
-4. Place your **Excel template** (e.g. `Season x amateur draft-template.xlsx`) in the project root. The template must contain:
-   - A **Hitters** sheet (header row 6) with columns: `Rnk`, `Player`, `Pos`, `B`, `T`, `Age`, plus rating columns and an **Overall Projection** formula in column A.
-   - A **Pitchers** sheet (header row 5) with the same structure.
+5. Build the executable:
 
-5. **Credentials:** Copy `credentials.env.example` to `credentials.env` and fill in your login. This file is in `.gitignore` — never commit it.
-
-   ```bash
-   cp credentials.env.example credentials.env
+   ```powershell
+   .\build.bat
    ```
 
-6. **Config:** Copy `config.json.example` to `config.json` and adjust scouting budgets and signability penalties for your team.
+   When it finishes, you will have **`HardballDraftOptimizer.exe` in the same folder** as `build.bat`, your template, and (if you followed Step 3) `credentials.env` and `config.json`. You do **not** need to copy anything into a `dist` folder.
 
-   ```bash
-   cp config.json.example config.json
+---
+
+### Step 5 — Run the executable
+
+1. Make sure these files are in the **project folder** next to `HardballDraftOptimizer.exe`:
+   - `credentials.env`
+   - `config.json`
+   - `Season x amateur draft-template.xlsx`
+2. Optional: put a custom **`algorithm.json`** in that same folder to override the one bundled inside the exe.
+
+Double-click **`HardballDraftOptimizer.exe`**.
+
+- The first time you use **Fetch data**, Chrome will open. Log in to WhatIfSports if asked.
+- The tool creates an **`outputs`** folder **next to the exe** for downloaded Excel files.
+
+If something fails, confirm the three required files are in the **same folder** as the `.exe`, not in a subfolder.
+
+---
+
+### Step 6 — Run the Python version instead (optional)
+
+Use this if you prefer a command line, want to change code, or avoid building an exe.
+
+Requirements: **Python 3.10+**, **Chrome**, and the same `credentials.env`, `config.json`, and template in the **project root**.
+
+1. Open PowerShell in the project folder.
+2. Run:
+
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
    ```
+
+3. **Graphical window (same buttons as the exe):**
+
+   ```powershell
+   python gui_app.py
+   ```
+
+4. **Command line examples:**
+
+   ```powershell
+   python main.py fetch
+   python main.py apply-order
+   ```
+
+The script uses **webdriver-manager** to download a matching ChromeDriver automatically.
 
 ## Commands
 
@@ -81,30 +215,15 @@ If no file is specified, the most recently modified `.xlsx` in `outputs/` is use
 
 ## GUI and executable
 
-A simple GUI runs the same workflow from buttons (no command line needed):
-
-```bash
-python gui_app.py
-```
+The **same window and buttons** appear whether you run the built program (`HardballDraftOptimizer.exe` in the project folder) or the Python GUI.
 
 - **Fetch data** — Opens the browser, scrapes the draft pool, and writes only the data (Hitters, Pitchers, Background) to a timestamped Excel file in `outputs/`.
 - **Sort master list** — Applies the algorithm (formulas, penalties) to the workbook, builds the Master List, and sorts it.
 - **Push to Hardball Dynasty** — Pushes the current Excel order to the site (Rank Players).
 
-Log output appears in the window. You can still use `main.py` from the command line for scripts or automation.
+Log output appears in the window.
 
-### Building a Windows executable
-
-1. Install PyInstaller: `pip install pyinstaller`
-2. From the project root, run: `build.bat` (or `pyinstaller --noconfirm --distpath . hardball_draft.spec`)
-3. The executable is created at `HardballDraftOptimizer.exe` in the project root.
-
-**Using the executable:** Place it in a folder alongside:
-- `credentials.env` (your login; copy from `credentials.env.example`)
-- `config.json` (game config; copy from `config.json.example`)
-- Your Excel template: `Season x amateur draft-template.xlsx`
-
-The first time you run Fetch, a browser window opens; log in to WhatIfSports if prompted. The app will create an `outputs` folder next to the exe for the generated Excel files. You can override the bundled `algorithm.json` by placing your own `algorithm.json` in the same folder as the exe.
+**Executable:** See **Setup → Steps 4–5** (build puts the exe in the project root next to your config files). **Python GUI:** see **Setup → Step 6** (`python gui_app.py`). Command-line users can use `main.py` as described in **Commands** below.
 
 ## Workflow
 
