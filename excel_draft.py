@@ -281,8 +281,37 @@ _THIN_BORDER = Border(
 )
 _ALIGN_CENTER = Alignment(horizontal="center", vertical="center")
 _ALIGN_LEFT = Alignment(horizontal="left", vertical="center")
-_NUM_FMT_PROJ = "0.0"
+_NUM_FMT_DECIMAL = "0.000"
+_NUM_FMT_PROJ = "0.000"
 _NUM_FMT_RATING = "0"
+
+
+def _inter_start_for_sheet(ws) -> int:
+    if ws.title == HITTERS_SHEET:
+        return _H_INTER_START
+    if ws.title == PITCHERS_SHEET:
+        return _P_INTER_START
+    return 9999
+
+
+def _number_format_for_cell(ws, col: int, row: int, *, ref_row: int, weight_rows: list[int], header_row: int) -> str | None:
+    """Return Excel number format for calculated/decimal cells; None for text or unformatted."""
+    if row == header_row:
+        return None
+    inter_start = _inter_start_for_sheet(ws)
+    if col == 1:
+        return _NUM_FMT_DECIMAL
+    if ws.title == PITCHERS_SHEET and col == _PITCHER_TOTAL_COL:
+        return _NUM_FMT_DECIMAL
+    if col >= inter_start:
+        return _NUM_FMT_DECIMAL
+    if row in weight_rows and col >= 8:
+        return _NUM_FMT_DECIMAL
+    if row == ref_row and col >= 8:
+        return _NUM_FMT_RATING
+    if row > header_row and col >= 8:
+        return _NUM_FMT_RATING
+    return None
 
 
 def _pitcher_total_formula(row: int) -> str:
@@ -412,10 +441,25 @@ def _format_rating_sheet(
 
     for wr in weight_rows:
         for col in range(1, last_col + 1):
-            _style_cell(ws.cell(wr, col), fill=_FILL_WEIGHT, font=_FONT_BOLD, align=_ALIGN_CENTER, border=_THIN_BORDER)
+            cell = ws.cell(wr, col)
+            _style_cell(
+                cell,
+                fill=_FILL_WEIGHT,
+                font=_FONT_BOLD,
+                align=_ALIGN_CENTER,
+                border=_THIN_BORDER,
+                number_format=_number_format_for_cell(ws, col, wr, ref_row=ref_row, weight_rows=weight_rows, header_row=header_row),
+            )
 
     for col in range(1, last_col + 1):
-        _style_cell(ws.cell(ref_row, col), fill=_FILL_REF, align=_ALIGN_CENTER, border=_THIN_BORDER)
+        cell = ws.cell(ref_row, col)
+        _style_cell(
+            cell,
+            fill=_FILL_REF,
+            align=_ALIGN_CENTER,
+            border=_THIN_BORDER,
+            number_format=_number_format_for_cell(ws, col, ref_row, ref_row=ref_row, weight_rows=weight_rows, header_row=header_row),
+        )
 
     meta_row = 4 if ws.title == HITTERS_SHEET else (3 if ws.title == PITCHERS_SHEET else None)
     if meta_row:
@@ -425,7 +469,7 @@ def _format_rating_sheet(
         alt = _FILL_ALT_ROW if (r - data_start) % 2 else None
         for col in range(1, last_col + 1):
             cell = ws.cell(r, col)
-            fmt = _NUM_FMT_PROJ if col == 1 else (_NUM_FMT_RATING if col >= 8 else None)
+            fmt = _number_format_for_cell(ws, col, r, ref_row=ref_row, weight_rows=weight_rows, header_row=header_row)
             _style_cell(
                 cell,
                 fill=alt,
@@ -436,7 +480,11 @@ def _format_rating_sheet(
 
     _style_cell(ws.cell(header_row, 1), fill=_FILL_PROJECTION)
     for r in range(data_start, data_end + 1):
-        _style_cell(ws.cell(r, 1), fill=_FILL_PROJECTION, number_format=_NUM_FMT_PROJ)
+        _style_cell(
+            ws.cell(r, 1),
+            fill=_FILL_PROJECTION,
+            number_format=_NUM_FMT_DECIMAL,
+        )
 
 
 def _format_background_sheet(ws) -> None:
@@ -464,9 +512,16 @@ def _format_master_list_sheet(ws, n_players: int) -> None:
         alt = _FILL_ALT_ROW if (r - 2) % 2 else None
         for col in range(1, 11):
             cell = ws.cell(r, col)
-            fmt = _NUM_FMT_PROJ if col <= 2 else ("0.000" if col == 4 else ("0.00" if col == 5 else None))
+            if col == 1 or col == 2:
+                fmt = _NUM_FMT_DECIMAL
+            elif col == 3:
+                fmt = _NUM_FMT_RATING
+            elif col in (4, 5):
+                fmt = _NUM_FMT_DECIMAL
+            else:
+                fmt = None
             _style_cell(cell, fill=alt, align=_ALIGN_LEFT if col == 6 else _ALIGN_CENTER, border=_THIN_BORDER, number_format=fmt)
-        _style_cell(ws.cell(r, 1), fill=_FILL_PROJECTION, number_format=_NUM_FMT_PROJ)
+        _style_cell(ws.cell(r, 1), fill=_FILL_PROJECTION, number_format=_NUM_FMT_DECIMAL)
     ws.freeze_panes = "A2"
 
 
