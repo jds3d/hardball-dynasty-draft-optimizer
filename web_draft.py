@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 from selenium import webdriver
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
@@ -30,6 +31,10 @@ HITTER_RATING_DISPLAY_NAMES: dict[str, str] = {}
 FIELDING_RATING_DISPLAY_NAMES: dict[str, str] = {}
 # Pitching view: rating columns for pitchers.
 PITCHER_RATING_DISPLAY_NAMES: dict[str, str] = {}
+
+
+class DraftPoolFetchError(RuntimeError):
+    """Raised when a required draft pool view could not be scraped."""
 
 
 def _get_chrome_driver(headless: bool = False, user_data_dir: str | None = None) -> webdriver.Chrome:
@@ -88,7 +93,7 @@ def _get_first_row_headers(table) -> list[str]:
     return []
 
 
-def _find_draft_table(driver: webdriver.Chrome):
+def _find_draft_table(driver: webdriver.Chrome, *, log_found: bool = True):
     """Find the Draft Prospects table by locating a table whose first row contains Rnk and Player."""
     tables = driver.find_elements(By.TAG_NAME, "table")
     for table in tables:
@@ -101,22 +106,22 @@ def _find_draft_table(driver: webdriver.Chrome):
             has_rank = any(h in ("rnk", "rank") or "rank" in h for h in header_lower)
             has_player = any(h == "player" or "player" in h for h in header_lower)
             if has_rank and has_player:
-                log.info("Found draft table (%s header cells).", len(header_cells))
+                if log_found:
+                    log.info("Found draft table (%s header cells).", len(header_cells))
                 return table
         except Exception:
             continue
     return None
 
 
-def _table_to_rows(
+def _resolve_draft_table(
     driver: webdriver.Chrome,
     table_selector: str = "table#dgPlayers",
-    rating_display_names: dict[str, str] | None = None,
-    key_prefix: str = "Rating",
-) -> list[dict[str, Any]]:
-    """Parse the draft prospects table into a list of dicts (header -> cell text)."""
-    rows: list[dict[str, Any]] = []
-    table = _find_draft_table(driver)
+    *,
+    log_found: bool = True,
+):
+    """Find the draft prospects table, or raise."""
+    table = _find_draft_table(driver, log_found=log_found)
     if not table:
         try:
             table = _wait(driver).until(EC.presence_of_element_located((By.CSS_SELECTOR, table_selector)))
@@ -127,60 +132,105 @@ def _table_to_rows(
                     break
                 except Exception:
                     continue
-        if not table:
-            raise RuntimeError("Could not find draft prospects table (no table with Rnk and Player columns).")
-    # Use same logic as _find_draft_table: first row = header (th or td)
-    header_cells = _get_first_row_headers(table)
-    if not header_cells:
-        raise RuntimeError("Draft table has no header row.")
-    # All rows except the first are data (in case there's no tbody/thead, or header is in tbody)
-    all_rows = table.find_elements(By.TAG_NAME, "tr")
-    body_rows = all_rows[1:] if len(all_rows) > 1 else []
-    # If the site uses a two-row header (text in row 1, icons in row 2), we only got 6 labels.
-    # Pad to the data row's column count so we scrape every column (Rating_7, Rating_8, ...).
-    for tr in body_rows:
-        cells = tr.find_elements(By.TAG_NAME, "td")
-        if len(cells) < len(header_cells):
+    if not table:
+        raise RuntimeError("Could not find draft prospects table (no table with Rnk and Player columns).")
+    return table
+
+
+def _is_header_data_row(cells) -> bool:
+    """True if this tr looks like a header row inside tbody."""
+    first_text = (cells[0].text.strip() if cells else "").lower()
+    second_text = (cells[1].text.strip() if len(cells) > 1 else "").lower()
+    return first_text in ("rnk", "rank") or second_text == "player"
+
+
+def _build_row_dict(
+    cells,
+    header_cells: list[str],
+    key_prefix: str,
+    rating_display_names: dict[str, str] | None,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {}
+    for i, h in enumerate(header_cells):
+        if i >= len(cells):
             continue
-        first_text = (cells[0].text.strip() if cells else "").lower()
-        second_text = (cells[1].text.strip() if len(cells) > 1 else "").lower()
-        if first_text in ("rnk", "rank") or second_text == "player":
-            continue
-        if len(cells) > len(header_cells):
-            header_cells = list(header_cells) + [""] * (len(cells) - len(header_cells))
-        break
-    for tr in body_rows:
-        cells = tr.find_elements(By.TAG_NAME, "td")
-        if len(cells) < len(header_cells):
-            continue
-        # Skip header row if it appears in tbody (e.g. first cell "Rnk"/"Rank" or second "Player")
-        first_text = (cells[0].text.strip() if cells else "").lower()
-        second_text = (cells[1].text.strip() if len(cells) > 1 else "").lower()
-        if first_text in ("rnk", "rank") or second_text == "player":
-            continue
-        row = {}
-        for i, h in enumerate(header_cells):
-            if i >= len(cells):
-                continue
-            raw = cells[i].text.strip()
-            parsed = _parse_cell(raw)
-            positional_key = f"{key_prefix}_{i + 1}"
-            row[positional_key] = parsed
-            # Also store under the header-derived name if we have one
-            name_key = (h or "").strip()
-            if name_key and name_key != positional_key:
-                row[name_key] = parsed
-            # Apply display name overrides
-            if rating_display_names and positional_key in rating_display_names:
-                row[rating_display_names[positional_key]] = parsed
-        # Skip rows with no player name (e.g. second header row with icons)
-        if not row or (not row.get("Player") and not row.get("Player Name")):
-            continue
-        if not rows:
-            log.info("First scraped row keys: %s", list(row.keys()))
-            log.info("First scraped row values: %s", row)
-        rows.append(row)
-    log.info("Header labels from page: %s", header_cells)
+        raw = cells[i].text.strip()
+        parsed = _parse_cell(raw)
+        positional_key = f"{key_prefix}_{i + 1}"
+        row[positional_key] = parsed
+        name_key = (h or "").strip()
+        if name_key and name_key != positional_key:
+            row[name_key] = parsed
+        if rating_display_names and positional_key in rating_display_names:
+            row[rating_display_names[positional_key]] = parsed
+    return row
+
+
+def _table_to_rows(
+    driver: webdriver.Chrome,
+    table_selector: str = "table#dgPlayers",
+    rating_display_names: dict[str, str] | None = None,
+    key_prefix: str = "Rating",
+) -> list[dict[str, Any]]:
+    """Parse the draft prospects table into a list of dicts (header -> cell text)."""
+    for attempt in range(3):
+        try:
+            rows: list[dict[str, Any]] = []
+            table = _resolve_draft_table(driver, table_selector, log_found=(attempt == 0))
+            header_cells = list(_get_first_row_headers(table))
+            if not header_cells:
+                raise RuntimeError("Draft table has no header row.")
+
+            all_rows = table.find_elements(By.TAG_NAME, "tr")
+            body_rows = all_rows[1:] if len(all_rows) > 1 else []
+            for tr in body_rows:
+                cells = tr.find_elements(By.TAG_NAME, "td")
+                if len(cells) < len(header_cells):
+                    continue
+                if _is_header_data_row(cells):
+                    continue
+                if len(cells) > len(header_cells):
+                    header_cells = list(header_cells) + [""] * (len(cells) - len(header_cells))
+                row = _build_row_dict(cells, header_cells, key_prefix, rating_display_names)
+                if not row or (not row.get("Player") and not row.get("Player Name")):
+                    continue
+                if not rows:
+                    log.info("First scraped row keys: %s", list(row.keys()))
+                    log.info("First scraped row values: %s", row)
+                rows.append(row)
+
+            log.info("Header labels from page: %s", header_cells)
+            return rows
+        except StaleElementReferenceException:
+            if attempt == 2:
+                raise
+            log.warning("Stale table during parse; retrying (attempt %s/3)...", attempt + 2)
+            time.sleep(0.5)
+
+    raise RuntimeError("Could not parse draft table after retries.")
+
+
+def _parse_draft_view(
+    driver: webdriver.Chrome,
+    view_name: str,
+    *,
+    rating_display_names: dict[str, str] | None = None,
+    key_prefix: str = "Rating",
+) -> list[dict[str, Any]]:
+    """Parse one draft-pool view; abort the fetch if parsing fails or returns no rows."""
+    try:
+        rows = _table_to_rows(
+            driver,
+            rating_display_names=rating_display_names,
+            key_prefix=key_prefix,
+        )
+    except Exception as exc:
+        raise DraftPoolFetchError(f"Could not parse {view_name} table: {exc}") from exc
+    if not rows:
+        raise DraftPoolFetchError(
+            f"{view_name} table returned no player rows; fetch aborted (output would be incomplete)."
+        )
+    log.info("Fetch: Parsed %s %s rows.", len(rows), view_name)
     return rows
 
 
@@ -388,25 +438,19 @@ def fetch_draft_pool_data(
     log.info("Fetch: Setting View to Projected Hitting Ratings, clicking GO...")
     _set_dropdown(driver, "Projected Hitting Ratings", ["View", "ddlView"])
     _go_and_wait_for_table(driver, "Hitting")
-    try:
-        hitting_view_rows = _table_to_rows(driver, rating_display_names=HITTER_RATING_DISPLAY_NAMES)
-    except Exception as e:
-        log.warning("Fetch: Could not parse hitting table: %s", e)
-        hitting_view_rows = []
+    hitting_view_rows = _parse_draft_view(
+        driver, "hitting", rating_display_names=HITTER_RATING_DISPLAY_NAMES,
+    )
     hitting_view_rows = [norm(r) for r in hitting_view_rows]
-    log.info("Fetch: Parsed %s hitting view rows.", len(hitting_view_rows))
 
     # --- Fielding/General view (merge with hitting for hitters) ---
     log.info("Fetch: Setting View to Projected Fielding/General Ratings, clicking GO...")
     _set_dropdown(driver, "Projected Fielding/General Ratings", ["View", "ddlView"])
     _go_and_wait_for_table(driver, "Fielding")
-    try:
-        fielding_view_rows = _table_to_rows(driver, rating_display_names=FIELDING_RATING_DISPLAY_NAMES, key_prefix="Fielding")
-    except Exception as e:
-        log.warning("Fetch: Could not parse fielding table: %s", e)
-        fielding_view_rows = []
+    fielding_view_rows = _parse_draft_view(
+        driver, "fielding/general", rating_display_names=FIELDING_RATING_DISPLAY_NAMES, key_prefix="Fielding",
+    )
     fielding_view_rows = [norm(r) for r in fielding_view_rows]
-    log.info("Fetch: Parsed %s fielding/general view rows.", len(fielding_view_rows))
 
     # Merge hitting + fielding by player name (hitting base; add fielding columns that don't conflict)
     fielding_by_name = {_norm_name(_player_name(r)): r for r in fielding_view_rows}
@@ -425,25 +469,24 @@ def fetch_draft_pool_data(
     log.info("Fetch: Setting View to Projected Pitching Ratings (pitchers), clicking GO...")
     _set_dropdown(driver, "Projected Pitching Ratings", ["View", "ddlView"])
     _go_and_wait_for_table(driver, "Pitching")
-    try:
-        pitching_rows = _table_to_rows(driver, rating_display_names=PITCHER_RATING_DISPLAY_NAMES)
-    except Exception as e:
-        log.warning("Fetch: Could not parse pitching table: %s", e)
-        pitching_rows = []
+    pitching_rows = _parse_draft_view(
+        driver, "pitching", rating_display_names=PITCHER_RATING_DISPLAY_NAMES,
+    )
     pitching_rows = [norm(r) for r in pitching_rows]
-    log.info("Fetch: Parsed %s pitching view rows.", len(pitching_rows))
+
+    # Merge fielding/general columns (e.g. Health) into pitching rows
+    for row in pitching_rows:
+        fg = fielding_by_name.get(_norm_name(_player_name(row)), {})
+        for k, v in fg.items():
+            if k not in row:
+                row[k] = v
 
     # --- Background Info view (signability, school, class) ---
     log.info("Fetch: Setting View to Background Info, clicking GO...")
     _set_dropdown(driver, "Background Info", ["View", "ddlView"])
     _go_and_wait_for_table(driver, "Background")
-    try:
-        background_rows = _table_to_rows(driver, key_prefix="BG")
-    except Exception as e:
-        log.warning("Fetch: Could not parse background info table: %s", e)
-        background_rows = []
+    background_rows = _parse_draft_view(driver, "background info", key_prefix="BG")
     background_rows = [norm(r) for r in background_rows]
-    log.info("Fetch: Parsed %s background info rows.", len(background_rows))
 
     # Merge signability + class into hitter/pitcher rows by player name
     bg_by_name = {_norm_name(_player_name(r)): r for r in background_rows}
@@ -994,14 +1037,13 @@ def _wait_for_login(driver: webdriver.Chrome) -> None:
 
 
 def run_sync_from_web_to_excel(
-    excel_path: str,
     headless: bool = False,
     user_data_dir: str | None = None,
     top_n: int = 500,
     output_dir: str | None = "outputs",
 ) -> None:
     """
-    Open browser, fetch draft pool data, write to Excel in ./outputs/.
+    Open browser, fetch draft pool data, write to a new Excel file in ./outputs/.
     Season number is read from the page (e.g. "Strawberry-Gooden (30) - Scottsdale" -> 30).
     """
     from pathlib import Path
@@ -1023,7 +1065,7 @@ def run_sync_from_web_to_excel(
         output_path = out_dir / f"Season {season_label} amateur draft {timestamp}.xlsx"
         log.info("Fetch: Writing to %s...", output_path)
         write_draft_data_to_excel(
-            excel_path, hitters, pitchers, background_rows=background, output_path=output_path, data_only=True
+            None, hitters, pitchers, background_rows=background, output_path=output_path, data_only=True
         )
         log.info("Fetch: Done. Wrote %s hitters and %s pitchers to %s", len(hitters), len(pitchers), output_path)
         print(f"Wrote {len(hitters)} hitters and {len(pitchers)} pitchers to {output_path}")

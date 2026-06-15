@@ -5,19 +5,18 @@ Automate your [WhatIfSports Hardball Dynasty](https://www.whatifsports.com/hbd/)
 ## Features
 
 - Scrapes hitting, fielding, pitching, and background-info views into a single Excel file.
-- Generates a **Master List** that ranks every prospect by an adjusted score factoring in your template's projection formula, scouting-budget trust, and signability risk.
+- Generates a **Master List** that ranks every prospect by an adjusted score factoring in the projection formula from `algorithm.json`, scouting-budget trust, and signability risk.
 - Applies that order to the site's Rank Players popup via Selenium (instant JavaScript reorder).
 - All penalty weights and formula constants are configurable in `config.json` and `algorithm.json`.
 
 ## Setup (no Python or Git experience required)
 
-This section assumes you are on **Windows** and have never used Git or Python before. You can use either the **ready-made program** (`HardballDraftOptimizer.exe` in the **project folder**, next to your template and config) or the **Python version** (optional).
+This section assumes you are on **Windows** and have never used Git or Python before. You can use either the **ready-made program** (`HardballDraftOptimizer.exe` in the **project folder**, next to your config) or the **Python version** (optional).
 
 ### What you need
 
 - A **WhatIfSports / Hardball Dynasty** account.
 - **Google Chrome** installed (the tool drives Chrome automatically).
-- The **Excel template** file that comes with this project: `Season x amateur draft-template.xlsx` (it must stay in the project; do not rename it unless you know what you are doing).
 
 ---
 
@@ -79,7 +78,7 @@ You do **not** need Git if you use the ZIP, but you will have to download a fres
 
 ### Step 3 — Add your login and game settings (everyone must do this)
 
-The program reads `credentials.env`, `config.json`, and the Excel template from **the same folder as the executable**. After you build (Step 4), that folder is the **project root**, so prepare these files there now.
+The program reads `credentials.env`, `config.json`, and `algorithm.json` from **the same folder as the executable**. After you build (Step 4), that folder is the **project root**, so prepare these files there now.
 
 1. **Login file**
    - In File Explorer, open the project folder.
@@ -92,10 +91,8 @@ The program reads `credentials.env`, `config.json`, and the Excel template from 
    - Copy `config.json.example` and rename the copy to `config.json`.
    - Open `config.json` in Notepad and adjust values if you want (defaults are fine to start).
 
-3. **Excel template**
-   - Keep `Season x amateur draft-template.xlsx` in the project. The tool uses it as the layout for Hitters and Pitchers. It must contain:
-     - A **Hitters** sheet (header row 6) with columns such as `Rnk`, `Player`, `Pos`, `B`, `T`, `Age`, plus rating columns. Column A is used for the overall projection once the algorithm is applied.
-     - A **Pitchers** sheet (header row 5) with the same kind of structure.
+3. **Algorithm** (optional)
+   - The bundled `algorithm.json` controls projection formulas and weights. Copy or edit it in the project folder to customize how prospects are scored.
 
 ---
 
@@ -123,7 +120,7 @@ You only need this if you were not given a pre-built `.exe`. This step **does** 
    .\build.bat
    ```
 
-   When it finishes, you will have **`HardballDraftOptimizer.exe` in the same folder** as `build.bat`, your template, and (if you followed Step 3) `credentials.env` and `config.json`. You do **not** need to copy anything into a `dist` folder.
+   When it finishes, you will have **`HardballDraftOptimizer.exe` in the same folder** as `build.bat` and (if you followed Step 3) `credentials.env` and `config.json`. You do **not** need to copy anything into a `dist` folder.
 
 ---
 
@@ -132,7 +129,6 @@ You only need this if you were not given a pre-built `.exe`. This step **does** 
 1. Make sure these files are in the **project folder** next to `HardballDraftOptimizer.exe`:
    - `credentials.env`
    - `config.json`
-   - `Season x amateur draft-template.xlsx`
 2. Optional: put a custom **`algorithm.json`** in that same folder to override the one bundled inside the exe.
 
 Double-click **`HardballDraftOptimizer.exe`**.
@@ -140,7 +136,7 @@ Double-click **`HardballDraftOptimizer.exe`**.
 - The first time you use **Fetch data**, Chrome will open. Log in to WhatIfSports if asked.
 - The tool creates an **`outputs`** folder **next to the exe** for downloaded Excel files.
 
-If something fails, confirm the three required files are in the **same folder** as the `.exe`, not in a subfolder.
+If something fails, confirm `credentials.env` and `config.json` are in the **same folder** as the `.exe`, not in a subfolder.
 
 ---
 
@@ -148,7 +144,7 @@ If something fails, confirm the three required files are in the **same folder** 
 
 Use this if you prefer a command line, want to change code, or avoid building an exe.
 
-Requirements: **Python 3.10+**, **Chrome**, and the same `credentials.env`, `config.json`, and template in the **project root**.
+Requirements: **Python 3.10+**, **Chrome**, and the same `credentials.env` and `config.json` in the **project root**.
 
 1. Open PowerShell in the project folder.
 2. Run:
@@ -178,11 +174,10 @@ The script uses **webdriver-manager** to download a matching ChromeDriver automa
 
 ### `fetch` — Get data only (no formulas)
 
-Pulls all prospect data from the Amateur Draft Player Pool page across four views (Hitting, Fielding/General, Pitching, Background Info), merges them, and writes **only the data** (Hitters, Pitchers, Background Info) to a timestamped file in `outputs/`. No algorithm formulas, no Master List — just the raw data to paste in. You apply the algorithm when you run **Sort master list** or **apply-order**.
+Pulls all prospect data from the Amateur Draft Player Pool page across four views (Hitting, Fielding/General, Pitching, Background Info), merges them, and writes a **new formatted workbook** with Hitters, Pitchers, and Background Info to a timestamped file in `outputs/`. No algorithm formulas or Master List yet — apply those when you run **Sort master list** or **apply-order**.
 
 ```bash
 python main.py fetch
-python main.py "path/to/template.xlsx" fetch
 ```
 
 | Option | Default | Description |
@@ -192,7 +187,7 @@ python main.py "path/to/template.xlsx" fetch
 | `--headless` | off | Run Chrome without a visible window |
 | `--chrome-profile PATH` | none | Chrome user-data dir for saved login |
 
-The template is never modified. Output is saved as `outputs/Season N amateur draft YYYY-MM-DD_HH-MM-SS.xlsx`.
+Output is saved as `outputs/Season N amateur draft YYYY-MM-DD_HH-MM-SS.xlsx`. Workbooks are built entirely in code (no template file required).
 
 ### `apply-order` — Apply algorithm, sort Master List, then optionally push to the site
 
@@ -238,7 +233,7 @@ Log output appears in the window.
 | Region | Columns | Contents |
 |--------|---------|----------|
 | Projection | A | Overall Projection (formula generated from `algorithm.json`; wrapped with `IFERROR`) |
-| Hitting | B–P | Rnk, Player, Pos, B, T, Age, Contact, Power, vs L, vs R, Batting Eye, Baserunning, Arm, Bunt, Overall |
+| Hitting | B–P | Rnk, Player, Pos, B, T, Age, Contact, Power, vs L, vs R, Batting Eye, Baserunning, Bunt, Push/Pull, Overall |
 | Fielding | Q onward | Rank, Player, Pos, B, T, Age, Range, Glove, Arm Strength, Arm Accuracy, Pitch Calling, Durability, Health, Speed, Patience, Temper, Makeup, Overall |
 | Weights | Row 1 | Individual rating weights from `algorithm.json` (at each rating column) |
 | Catcher weights | Row 2 | Alternate fielding weights for catchers |
@@ -250,10 +245,11 @@ Log output appears in the window.
 | Region | Columns | Contents |
 |--------|---------|----------|
 | Projection | A | Overall Projection (formula generated from `algorithm.json`; wrapped with `IFERROR`) |
-| Ratings | B–S | Rank, Player, Position, B, T, Age, Durability, Stamina, Control, vsL, vsR, Velocity, GB/FB Tendency, Pitch 1–5, Overall |
+| Ratings | B–U | Rank, Player, Position, B, T, Age, Health, Durability, Stamina, Control, vsL, vsR, Velocity, GB/FB Tendency, Pitch 1–5, Overall |
 | Weights | Row 1 | Individual rating weights from `algorithm.json` (at each rating column) |
-| Group weights | Row 2 | Group weights at intermediate columns (U–W) |
-| Intermediates | U–W | Computed group scores: pitching, pitches, durability/stamina |
+| Group weights | Row 2 | Group weights at intermediate columns (V–X); H2/J2/O2 helper weights for column Z |
+| Intermediates | V–X | Computed group scores: pitching, pitches, durability/stamina |
+| Helpers | Z–AA | Z = weighted intermediate total; AA = SP/RP/CRAP role classification |
 
 ### Master List (auto-generated)
 
@@ -333,7 +329,7 @@ The `first_round` and `first_five` penalties are conditional: if the player's ra
 
 ## Projection Algorithm (`algorithm.json`)
 
-Everything that controls the Overall Projection formula lives in `algorithm.json`: the polynomial coefficients, every individual rating weight, group weights, and the method used for each group. If you delete the file, the script preserves whatever formulas are already in your template.
+Everything that controls the Overall Projection formula lives in `algorithm.json`: the polynomial coefficients, every individual rating weight, group weights, and the method used for each group. Fetch and apply-order both require this file (a copy is bundled with the project).
 
 ### How it works
 
@@ -393,9 +389,9 @@ Default curve: `f(x) = -0.000002·x³ + 0.00032·x² - 0.0021·x` — compresses
 
 These must match the names used in `algorithm.json`:
 
-**Hitters:** Contact, Power, vs L, vs R, Batting Eye, Baserunning, Arm, Bunt, Range, Glove, Arm Strength, Arm Accuracy, Pitch Calling, Durability, Health, Speed, Patience, Temper, Makeup
+**Hitters:** Contact, Power, vs L, vs R, Batting Eye, Baserunning, Bunt, Push/Pull, Range, Glove, Arm Strength, Arm Accuracy, Pitch Calling, Durability, Health, Speed, Patience, Temper, Makeup
 
-**Pitchers:** Durability, Stamina, Control, vsL, vsR, Velocity, GB/FB, Pitch 1, Pitch 2, Pitch 3, Pitch 4, Pitch 5
+**Pitchers:** Health, Durability, Stamina, Control, vsL, vsR, Velocity, GB/FB, Pitch 1, Pitch 2, Pitch 3, Pitch 4, Pitch 5
 
 ### Group properties
 
@@ -416,7 +412,7 @@ The script writes all weights from `algorithm.json` into the Excel sheet so they
 
 - **Row 1:** Individual rating weights at their column (e.g. Contact weight → H1)
 - **Row 2 (hitters only):** Catcher-specific weights
-- **Row 3 (hitters) / Row 2 (pitchers):** Group weights at the intermediate columns (AI–AM for hitters, U–W for pitchers)
+- **Row 3 (hitters) / Row 2 (pitchers):** Group weights at the intermediate columns (AI–AM for hitters, V–X for pitchers)
 
 ### Examples
 
@@ -445,7 +441,7 @@ Use a linear algorithm (disable the polynomial):
 hardball-dynasty-draft-optimizer/
 ├── main.py                 # CLI entry point (fetch / apply-order)
 ├── web_draft.py            # Selenium scraping, login, and Rank Players automation
-├── excel_draft.py          # Excel reading/writing, Master List generation, COM sorting
+├── excel_draft.py          # Excel workbook builder, Master List, COM sorting
 ├── credentials.py          # Loads credentials + config from their respective files
 ├── algorithm.json          # Projection algorithm: polynomial + all rating/group weights
 ├── config.json             # Scouting budgets, trust formula, signability penalties (gitignored)
@@ -453,7 +449,6 @@ hardball-dynasty-draft-optimizer/
 ├── requirements.txt        # Python dependencies
 ├── credentials.env.example # Template for credentials.env
 ├── credentials.env         # Login credentials (gitignored)
-├── *.xlsx                  # Your Excel template (gitignored)
 └── outputs/                # Generated output files (gitignored)
 ```
 

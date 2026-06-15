@@ -1,7 +1,7 @@
 """
 Resolve the application directory: project root when running as script,
 directory containing the executable when run as a frozen (PyInstaller) exe.
-Config, credentials, template, and outputs are expected in this directory
+Config, credentials, algorithm.json, and outputs are expected in this directory
 (or outputs/ subdir).
 """
 import sys

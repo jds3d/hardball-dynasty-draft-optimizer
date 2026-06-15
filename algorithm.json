@@ -1,5 +1,5 @@
 {
-    "_comment": "Polynomial coefficients and all rating/group weights. Delete this file to use template formulas as-is.",
+    "_comment": "Polynomial coefficients and all rating/group weights. Required for fetch/apply-order; formulas are generated from this file.",
     "polynomial": {
         "a3": -0.000002,
         "a2": 0.00032,
@@ -24,8 +24,8 @@
                 "method": "polynomial",
                 "ratings": {
                     "Baserunning": 1.0,
-                    "Arm": 0.2,
-                    "Bunt": 0.1
+                    "Bunt": 0.2,
+                    "Push/Pull": 0.1
                 }
             },
             "fielding": {
@@ -103,7 +103,8 @@
                 "method": "polynomial",
                 "ratings": {
                     "Durability": 1.0,
-                    "Stamina": 4.0
+                    "Stamina": 4.0,
+                    "Health": 0.2
                 },
                 "penalty": {
                     "type": "proportional",

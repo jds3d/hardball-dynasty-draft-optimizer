@@ -13,8 +13,6 @@ from pathlib import Path
 
 from app_dir import get_app_dir
 
-# Template in project root; override by passing a path as first argument.
-DEFAULT_TEMPLATE = get_app_dir() / "Season x amateur draft-template.xlsx"
 OUTPUTS_DIR = get_app_dir() / "outputs"
 
 DEFAULT_CHROME_PROFILE = None
@@ -37,8 +35,7 @@ def main() -> None:
         type=Path,
         nargs="?",
         default=None,
-        help="Path to Excel file. fetch: template (default: template in project root). "
-             "apply-order: output file (default: latest file in outputs/).",
+        help="Path to Excel output file (apply-order only; default: latest file in outputs/).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -98,17 +95,25 @@ def main() -> None:
             print("No output files found in outputs/. Run 'fetch' first or specify a file.", file=sys.stderr)
             sys.exit(1)
     else:
-        excel_path = DEFAULT_TEMPLATE
+        excel_path = None
 
-    if not excel_path.exists():
-        print(f"Excel file not found: {excel_path}", file=sys.stderr)
-        sys.exit(1)
+    if args.command == "apply-order":
+        if not excel_path or not excel_path.exists():
+            print(f"Excel file not found: {excel_path}", file=sys.stderr)
+            sys.exit(1)
 
-    from excel_draft import validate_template
+    from excel_draft import validate_fetch_prerequisites, validate_workbook
     if args.command == "fetch":
-        validation = validate_template(excel_path)
+        validation = validate_fetch_prerequisites()
         if validation:
-            print("Template validation failed:", file=sys.stderr)
+            print("Fetch prerequisites failed:", file=sys.stderr)
+            for msg in validation:
+                print(f"  - {msg}", file=sys.stderr)
+            sys.exit(1)
+    elif args.command == "apply-order":
+        validation = validate_workbook(excel_path)
+        if validation:
+            print("Workbook validation failed:", file=sys.stderr)
             for msg in validation:
                 print(f"  - {msg}", file=sys.stderr)
             sys.exit(1)
@@ -121,13 +126,16 @@ def main() -> None:
 
     if args.command == "fetch":
         profile = str(args.chrome_profile) if getattr(args, "chrome_profile") and args.chrome_profile else None
-        run_sync_from_web_to_excel(
-            str(excel_path),
-            headless=headless,
-            user_data_dir=profile,
-            top_n=getattr(args, "top", 500),
-            output_dir=str(args.output_dir) if getattr(args, "output_dir", None) else "outputs",
-        )
+        try:
+            run_sync_from_web_to_excel(
+                headless=headless,
+                user_data_dir=profile,
+                top_n=getattr(args, "top", 500),
+                output_dir=str(args.output_dir) if getattr(args, "output_dir", None) else "outputs",
+            )
+        except Exception as exc:
+            print(f"Fetch failed: {exc}", file=sys.stderr)
+            sys.exit(1)
     elif args.command == "apply-order":
         sort_ok = reapply_formula_and_sort_master_list(excel_path)
         if not sort_ok:

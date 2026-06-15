@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
-import pandas as pd
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from app_dir import get_algorithm_file
 
@@ -186,8 +187,8 @@ HITTERS_HITTING_LAYOUT: list[tuple[int, str, list[str]]] = [
     (11, "vs R", ["Rating_10"]),
     (12, "Batting Eye", ["Rating_11"]),
     (13, "Baserunning", ["Rating_12"]),
-    (14, "Arm", ["Rating_13"]),
-    (15, "Bunt", ["Rating_14"]),
+    (14, "Bunt", ["Rating_13"]),
+    (15, "Push/Pull", ["Rating_14"]),
     (16, "Overall", ["Rating_15"]),
 ]
 
@@ -204,19 +205,20 @@ PITCHERS_LAYOUT: list[tuple[int, str, list[str]]] = [
     (5, "B", ["Rating_4", "B", "Bats"]),
     (6, "T", ["Rating_5", "T", "Throws"]),
     (7, "Age", ["Rating_6", "Age"]),
-    (8, "Durability", ["Rating_7"]),
-    (9, "Stamina", ["Rating_8"]),
-    (10, "Control", ["Rating_9"]),
-    (11, "vsL", ["Rating_10"]),
-    (12, "vsR", ["Rating_11"]),
-    (13, "Velocity", ["Rating_12"]),
-    (14, "Groundball/Flyball Tendency", ["Rating_13"]),
-    (15, "Pitch 1", ["Rating_14"]),
-    (16, "Pitch 2", ["Rating_15"]),
-    (17, "Pitch 3", ["Rating_16"]),
-    (18, "Pitch 4", ["Rating_17"]),
-    (19, "Pitch 5", ["Rating_18"]),
-    (20, "Overall", ["Rating_19"]),
+    (8, "Health", ["Fielding_13", "Health"]),
+    (9, "Durability", ["Rating_7"]),
+    (10, "Stamina", ["Rating_8"]),
+    (11, "Control", ["Rating_9"]),
+    (12, "vsL", ["Rating_10"]),
+    (13, "vsR", ["Rating_11"]),
+    (14, "Velocity", ["Rating_12"]),
+    (15, "Groundball/Flyball Tendency", ["Rating_13"]),
+    (16, "Pitch 1", ["Rating_14"]),
+    (17, "Pitch 2", ["Rating_15"]),
+    (18, "Pitch 3", ["Rating_16"]),
+    (19, "Pitch 4", ["Rating_17"]),
+    (20, "Pitch 5", ["Rating_18"]),
+    (21, "Overall", ["Rating_19"]),
 ]
 
 # Display headers for fielding columns, in website order (Fielding_1 = first column, etc.).
@@ -235,22 +237,22 @@ FIELDING_HEADERS: list[str] = [
 ALGORITHM_FILE = get_algorithm_file()
 ALGORITHM_SHEET = "Algorithm"
 
-# Rating name → Excel column letter for each sheet (fixed by template layout).
+# Rating name → Excel column letter for each sheet (fixed layout).
 _HITTER_RATING_COL: dict[str, str] = {
     "Contact": "H", "Power": "I", "vs L": "J", "vs R": "K", "Batting Eye": "L",
-    "Baserunning": "M", "Arm": "N", "Bunt": "O",
+    "Baserunning": "M", "Bunt": "N", "Push/Pull": "O",
     "Range": "W", "Glove": "X", "Arm Strength": "Y", "Arm Accuracy": "Z",
     "Pitch Calling": "AA", "Durability": "AB", "Health": "AC",
     "Speed": "AD", "Patience": "AE", "Temper": "AF", "Makeup": "AG",
 }
 _PITCHER_RATING_COL: dict[str, str] = {
-    "Durability": "H", "Stamina": "I", "Control": "J", "vsL": "K", "vsR": "L",
-    "Velocity": "M", "GB/FB": "N",
-    "Pitch 1": "O", "Pitch 2": "P", "Pitch 3": "Q", "Pitch 4": "R", "Pitch 5": "S",
+    "Health": "H", "Durability": "I", "Stamina": "J", "Control": "K", "vsL": "L", "vsR": "M",
+    "Velocity": "N", "GB/FB": "O",
+    "Pitch 1": "P", "Pitch 2": "Q", "Pitch 3": "R", "Pitch 4": "S", "Pitch 5": "T",
 }
 
 _H_INTER_START = 35   # Column AI — first hitter intermediate column
-_P_INTER_START = 21   # Column U  — first pitcher intermediate column
+_P_INTER_START = 22   # Column V  — first pitcher intermediate column
 _H_REF_ROW = 5        # Hitter "perfect player" row (all 100s)
 _P_REF_ROW = 4        # Pitcher "perfect player" row (all 100s)
 _H_WEIGHT_ROW = 1     # Individual weight row for hitters
@@ -258,6 +260,242 @@ _H_CATCHER_ROW = 2    # Catcher-specific weight row for hitters
 _H_GROUP_ROW = 3      # Group weight row for hitters
 _P_WEIGHT_ROW = 1     # Individual weight row for pitchers
 _P_GROUP_ROW = 2      # Group weight row for pitchers
+_PITCHER_TOTAL_COL = 26   # Column Z — weighted intermediate total
+_PITCHER_ROLE_COL = 27    # Column AA — SP/RP/CRAP role helper
+
+# ── Workbook styling ───────────────────────────────────────────────────────
+_FILL_HEADER = PatternFill("solid", fgColor="1B3A4B")
+_FILL_REF = PatternFill("solid", fgColor="F5E6C8")
+_FILL_WEIGHT = PatternFill("solid", fgColor="E9EEF3")
+_FILL_PROJECTION = PatternFill("solid", fgColor="D6EAF8")
+_FILL_MASTER_HDR = PatternFill("solid", fgColor="1E5631")
+_FILL_ALT_ROW = PatternFill("solid", fgColor="F7F9FB")
+_FONT_HEADER = Font(color="FFFFFF", bold=True, size=10)
+_FONT_BOLD = Font(bold=True, size=10)
+_FONT_META = Font(italic=True, color="5D6D7E", size=9)
+_THIN_BORDER = Border(
+    left=Side(style="thin", color="D5D8DC"),
+    right=Side(style="thin", color="D5D8DC"),
+    top=Side(style="thin", color="D5D8DC"),
+    bottom=Side(style="thin", color="D5D8DC"),
+)
+_ALIGN_CENTER = Alignment(horizontal="center", vertical="center")
+_ALIGN_LEFT = Alignment(horizontal="left", vertical="center")
+_NUM_FMT_PROJ = "0.0"
+_NUM_FMT_RATING = "0"
+
+
+def _pitcher_total_formula(row: int) -> str:
+    """Weighted sum of intermediate columns V/W/X using row-2 helper weights."""
+    return f"=V{row}*H$2+W{row}*O$2+X{row}*J$2"
+
+
+def _pitcher_role_formula(row: int) -> str:
+    """Classify pitcher role from Durability (I) and Stamina (J)."""
+    return (
+        f'=IF(AND(J{row}>50,I{row}+J{row}>75),"SP",'
+        f'IF(2*I{row}+J{row}>120,"RP","CRAP"))'
+    )
+
+
+def _restore_pitcher_total_weights(ws) -> None:
+    """Row-2 weights used by the column-Z total formula."""
+    ws.cell(_P_GROUP_ROW, 8, 1)   # H2
+    ws.cell(_P_GROUP_ROW, 10, 4)  # J2
+    ws.cell(_P_GROUP_ROW, 15, 2)  # O2
+
+
+def _hitter_rating_col_indices() -> list[int]:
+    cols = {_col_letter_to_idx(c) for c in _HITTER_RATING_COL.values()}
+    for offset in range(6, len(FIELDING_HEADERS)):
+        cols.add(FIELDING_BLOCK_START_COL + offset)
+    return sorted(cols)
+
+
+def _pitcher_rating_col_indices() -> list[int]:
+    return sorted({_col_letter_to_idx(c) for c in _PITCHER_RATING_COL.values()})
+
+
+def _fill_ref_row(ws, ref_row: int, rating_cols: list[int]) -> None:
+    for col in rating_cols:
+        ws.cell(ref_row, col, 100)
+
+
+def _apply_pitcher_helper_columns(ws, n_rows: int) -> None:
+    """Write column Z (total) and AA (role) formulas and headers."""
+    ws.cell(PITCHERS_HEADER_ROW, _PITCHER_TOTAL_COL, "total")
+    ws.cell(PITCHERS_HEADER_ROW, _PITCHER_ROLE_COL, "Role")
+    _restore_pitcher_total_weights(ws)
+    ws.cell(_P_REF_ROW, _PITCHER_TOTAL_COL, _pitcher_total_formula(_P_REF_ROW))
+    for r in range(PITCHERS_HEADER_ROW + 1, PITCHERS_HEADER_ROW + 1 + n_rows):
+        ws.cell(r, _PITCHER_TOTAL_COL, _pitcher_total_formula(r))
+        ws.cell(r, _PITCHER_ROLE_COL, _pitcher_role_formula(r))
+
+
+def _setup_hitter_sheet(ws) -> None:
+    ws.cell(HITTERS_HEADER_ROW, 1, "Overall Projection")
+    for col_idx, header_label, _ in HITTERS_HITTING_LAYOUT:
+        ws.cell(HITTERS_HEADER_ROW, col_idx, header_label)
+    for offset, header in enumerate(FIELDING_HEADERS):
+        ws.cell(HITTERS_HEADER_ROW, FIELDING_BLOCK_START_COL + offset, header)
+    ws.cell(_H_REF_ROW, 1).value = None
+    ws.cell(4, 1, "Reference (all ratings = 100)")
+    _fill_ref_row(ws, _H_REF_ROW, _hitter_rating_col_indices())
+
+
+def _setup_pitcher_sheet(ws) -> None:
+    ws.cell(PITCHERS_HEADER_ROW, 1, "Overall Projection")
+    _write_pitchers_headers(ws)
+    ws.cell(3, 1, "Reference (all ratings = 100)")
+    ws.cell(_P_REF_ROW, 1).value = None
+    _fill_ref_row(ws, _P_REF_ROW, _pitcher_rating_col_indices())
+    ws.cell(PITCHERS_HEADER_ROW, _PITCHER_TOTAL_COL, "total")
+    ws.cell(PITCHERS_HEADER_ROW, _PITCHER_ROLE_COL, "Role")
+    _restore_pitcher_total_weights(ws)
+
+
+def create_workbook() -> openpyxl.Workbook:
+    """Create a fresh draft workbook (no template file required)."""
+    wb = openpyxl.Workbook()
+    default = wb.active
+    wb.remove(default)
+    ws_h = wb.create_sheet(HITTERS_SHEET)
+    ws_p = wb.create_sheet(PITCHERS_SHEET)
+    _setup_hitter_sheet(ws_h)
+    _setup_pitcher_sheet(ws_p)
+    return wb
+
+
+def _style_cell(cell, *, fill=None, font=None, align=None, border=None, number_format=None) -> None:
+    if fill:
+        cell.fill = fill
+    if font:
+        cell.font = font
+    if align:
+        cell.alignment = align
+    if border:
+        cell.border = border
+    if number_format:
+        cell.number_format = number_format
+
+
+def _format_rating_sheet(
+    ws,
+    header_row: int,
+    ref_row: int,
+    weight_rows: list[int],
+    last_col: int,
+    data_rows: int,
+) -> None:
+    data_start = header_row + 1
+    data_end = data_start + max(data_rows, 0) - 1
+
+    ws.freeze_panes = ws.cell(data_start, 2).coordinate
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["C"].width = 22
+    ws.column_dimensions["D"].width = 8
+
+    for col in range(1, last_col + 1):
+        letter = get_column_letter(col)
+        if col == 1:
+            pass
+        elif col in (3, 4):
+            pass
+        elif col == 15 and ws.title == PITCHERS_SHEET:
+            ws.column_dimensions[letter].width = 18
+        else:
+            ws.column_dimensions[letter].width = 9
+
+    for col in range(1, last_col + 1):
+        cell = ws.cell(header_row, col)
+        _style_cell(cell, fill=_FILL_HEADER, font=_FONT_HEADER, align=_ALIGN_CENTER, border=_THIN_BORDER)
+
+    for wr in weight_rows:
+        for col in range(1, last_col + 1):
+            _style_cell(ws.cell(wr, col), fill=_FILL_WEIGHT, font=_FONT_BOLD, align=_ALIGN_CENTER, border=_THIN_BORDER)
+
+    for col in range(1, last_col + 1):
+        _style_cell(ws.cell(ref_row, col), fill=_FILL_REF, align=_ALIGN_CENTER, border=_THIN_BORDER)
+
+    meta_row = 4 if ws.title == HITTERS_SHEET else (3 if ws.title == PITCHERS_SHEET else None)
+    if meta_row:
+        _style_cell(ws.cell(meta_row, 1), font=_FONT_META, align=_ALIGN_LEFT)
+
+    for r in range(data_start, data_end + 1):
+        alt = _FILL_ALT_ROW if (r - data_start) % 2 else None
+        for col in range(1, last_col + 1):
+            cell = ws.cell(r, col)
+            fmt = _NUM_FMT_PROJ if col == 1 else (_NUM_FMT_RATING if col >= 8 else None)
+            _style_cell(
+                cell,
+                fill=alt,
+                align=_ALIGN_LEFT if col == 3 else _ALIGN_CENTER,
+                border=_THIN_BORDER,
+                number_format=fmt,
+            )
+
+    _style_cell(ws.cell(header_row, 1), fill=_FILL_PROJECTION)
+    for r in range(data_start, data_end + 1):
+        _style_cell(ws.cell(r, 1), fill=_FILL_PROJECTION, number_format=_NUM_FMT_PROJ)
+
+
+def _format_background_sheet(ws) -> None:
+    for col_idx, header in enumerate(BACKGROUND_HEADERS, start=1):
+        cell = ws.cell(1, col_idx)
+        _style_cell(cell, fill=_FILL_HEADER, font=_FONT_HEADER, align=_ALIGN_CENTER, border=_THIN_BORDER)
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = 16 if header in ("Player", "School", "Signability") else 10
+    ws.freeze_panes = "A2"
+
+
+def _format_master_list_sheet(ws, n_players: int) -> None:
+    headers = [
+        "Adjusted Score", "Overall Projection", "Raw Overall",
+        "Scouting Trust", "Signability Factor",
+        "Player", "Pos", "Type", "Category", "Signability",
+    ]
+    widths = [14, 16, 12, 14, 16, 24, 6, 8, 12, 28]
+    for col_idx, (header, width) in enumerate(zip(headers, widths), start=1):
+        cell = ws.cell(1, col_idx)
+        cell.value = header
+        _style_cell(cell, fill=_FILL_MASTER_HDR, font=_FONT_HEADER, align=_ALIGN_CENTER, border=_THIN_BORDER)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    for r in range(2, 2 + n_players):
+        alt = _FILL_ALT_ROW if (r - 2) % 2 else None
+        for col in range(1, 11):
+            cell = ws.cell(r, col)
+            fmt = _NUM_FMT_PROJ if col <= 2 else ("0.000" if col == 4 else ("0.00" if col == 5 else None))
+            _style_cell(cell, fill=alt, align=_ALIGN_LEFT if col == 6 else _ALIGN_CENTER, border=_THIN_BORDER, number_format=fmt)
+        _style_cell(ws.cell(r, 1), fill=_FILL_PROJECTION, number_format=_NUM_FMT_PROJ)
+    ws.freeze_panes = "A2"
+
+
+def format_workbook(wb: openpyxl.Workbook, n_hitters: int = 0, n_pitchers: int = 0) -> None:
+    """Apply consistent styling to all sheets."""
+    if HITTERS_SHEET in wb.sheetnames:
+        _format_rating_sheet(
+            wb[HITTERS_SHEET], HITTERS_HEADER_ROW, _H_REF_ROW,
+            [_H_WEIGHT_ROW, _H_CATCHER_ROW, _H_GROUP_ROW], 39, n_hitters,
+        )
+    if PITCHERS_SHEET in wb.sheetnames:
+        _format_rating_sheet(
+            wb[PITCHERS_SHEET], PITCHERS_HEADER_ROW, _P_REF_ROW,
+            [_P_WEIGHT_ROW, _P_GROUP_ROW], 27, n_pitchers,
+        )
+    if BACKGROUND_SHEET in wb.sheetnames:
+        _format_background_sheet(wb[BACKGROUND_SHEET])
+    if MASTER_LIST_SHEET in wb.sheetnames:
+        ws = wb[MASTER_LIST_SHEET]
+        n = max(0, ws.max_row - 1)
+        _format_master_list_sheet(ws, n)
+
+
+def validate_fetch_prerequisites() -> list[str]:
+    """Checks required before fetch (no template file needed)."""
+    errors: list[str] = []
+    if not ALGORITHM_FILE.exists():
+        errors.append(f"Missing algorithm config: {ALGORITHM_FILE}")
+    return errors
 
 
 def _load_algorithm_config() -> dict | None:
@@ -348,6 +586,12 @@ def _write_weights_to_sheet(
     """Write individual rating weights (row 1), catcher weights (row 2), and
     group weights to their designated cells."""
     from openpyxl.utils import get_column_letter
+
+    if catcher_row is None:
+        for col in range(2, inter_start):
+            ws.cell(group_row, col, None)
+        if group_row == _P_GROUP_ROW:
+            _restore_pitcher_total_weights(ws)
 
     for gi, (gname, gdef) in enumerate(groups_cfg.items()):
         inter_col = inter_start + gi
@@ -533,6 +777,10 @@ def _apply_algorithm_formulas(
         for gi, gname in enumerate(groups_cfg):
             ws.cell(header_row, inter_start + gi, gname)
 
+        ws.cell(ref_row, 1).value = None
+        if sheet_name == PITCHERS_SHEET:
+            _apply_pitcher_helper_columns(ws, n_rows)
+
     # ── Write coefficients to Algorithm tab for visibility ──
     if ALGORITHM_SHEET not in wb.sheetnames:
         wb.create_sheet(ALGORITHM_SHEET)
@@ -594,8 +842,14 @@ def _parse_score(val: Any) -> float:
 
 
 def validate_template(path: str | Path) -> list[str]:
+    """Backward-compatible alias for validate_workbook."""
+    return validate_workbook(path)
+
+
+def validate_workbook(path: str | Path) -> list[str]:
     """
-    Check that the workbook has the expected structure. Returns list of error messages (empty if OK).
+    Check that an output workbook has the expected structure.
+    Returns list of error messages (empty if OK).
     """
     path = Path(path)
     errors: list[str] = []
@@ -707,13 +961,35 @@ def _cols_with_error_or_empty(ws: openpyxl.worksheet.worksheet.Worksheet, header
     return result
 
 
+def _write_pitchers_headers(ws) -> None:
+    """Write pitcher rating column headers from the fixed layout."""
+    for col_idx, header_label, _ in PITCHERS_LAYOUT:
+        ws.cell(PITCHERS_HEADER_ROW, col_idx, header_label)
+
+
+def _migrate_pitchers_health_column(ws) -> None:
+    """One-time shift: insert Health at H only when legacy Durability/Stamina layout is detected."""
+    header_row = PITCHERS_HEADER_ROW
+    h = ws.cell(header_row, 8).value
+    i = ws.cell(header_row, 9).value
+    if h == "Health" and i == "Durability":
+        return
+    if h != "Durability" or i != "Stamina":
+        return
+    ws.insert_cols(8)
+    for col in range(ws.max_column, 8, -1):
+        if ws.cell(header_row, col).value == "Health" and col > 8:
+            ws.delete_cols(col)
+            break
+
+
 def _write_hitters_sheet_fixed(
     ws: openpyxl.worksheet.worksheet.Worksheet,
     header_row: int,
     rows: list[dict[str, Any]],
 ) -> None:
     """
-    Write hitters data using the fixed template layout.
+    Write hitters data using the fixed workbook layout.
     Hitting block (B–P): basic info + 9 hitting ratings.
     Fielding block (Q onwards): direct copy-paste of the Fielding/General view (all columns in website order).
     """
@@ -830,6 +1106,7 @@ def _write_background_sheet(
             val = row.get(header)
             if val is not None:
                 ws.cell(i + 2, col_idx, val)
+    _format_background_sheet(ws)
 
 
 def _sort_master_list_via_excel(path: Path) -> bool:
@@ -1001,7 +1278,7 @@ def _write_master_list(
 
 
 def write_draft_data_to_excel(
-    path: str | Path,
+    path: str | Path | None,
     hitters_rows: list[dict[str, Any]],
     pitchers_rows: list[dict[str, Any]],
     background_rows: list[dict[str, Any]] | None = None,
@@ -1009,31 +1286,25 @@ def write_draft_data_to_excel(
     data_only: bool = False,
 ) -> None:
     """
-    Write scraped draft pool data into the Excel file.
+    Write scraped draft pool data into a new Excel workbook (built in code).
 
-    If data_only=True (fetch): only write Hitters, Pitchers, and Background Info.
+    If data_only=True (fetch): write Hitters, Pitchers, and Background Info only.
     Algorithm formulas and Master List are applied later when you run apply-order.
-
-    If data_only=False: write data + algorithm formulas + Master List (legacy;
-    prefer data_only=True and apply-order for algorithm/sort).
     """
-    path = Path(path)
-    save_to = Path(output_path) if output_path else path
+    save_to = Path(output_path) if output_path else Path(path) if path else Path("draft.xlsx")
     save_to.parent.mkdir(parents=True, exist_ok=True)
 
-    wb = openpyxl.load_workbook(path)
+    wb = create_workbook()
 
-    if HITTERS_SHEET in wb.sheetnames and hitters_rows:
+    if hitters_rows:
         _write_hitters_sheet_fixed(wb[HITTERS_SHEET], HITTERS_HEADER_ROW, hitters_rows)
 
-    if PITCHERS_SHEET in wb.sheetnames:
-        ws = wb[PITCHERS_SHEET]
-        for col_idx, header_label, keys in PITCHERS_LAYOUT:
-            ws.cell(PITCHERS_HEADER_ROW, col_idx, header_label)
-            for i, row in enumerate(pitchers_rows):
-                val = _row_value_for_keys(row, keys)
-                if val is not None:
-                    ws.cell(PITCHERS_HEADER_ROW + 1 + i, col_idx, val)
+    ws_p = wb[PITCHERS_SHEET]
+    for col_idx, _header_label, keys in PITCHERS_LAYOUT:
+        for i, row in enumerate(pitchers_rows):
+            val = _row_value_for_keys(row, keys)
+            if val is not None:
+                ws_p.cell(PITCHERS_HEADER_ROW + 1 + i, col_idx, val)
 
     if background_rows:
         _write_background_sheet(wb, background_rows)
@@ -1055,6 +1326,7 @@ def write_draft_data_to_excel(
                         cell.value = f"=IFERROR({str(v)[1:]},0)"
         _write_master_list(wb, hitters_rows, pitchers_rows)
 
+    format_workbook(wb, len(hitters_rows), len(pitchers_rows))
     wb.save(save_to)
     wb.close()
     log.info("Saved workbook: %s", save_to)
@@ -1115,7 +1387,7 @@ def _read_pitchers_from_workbook(wb: openpyxl.Workbook) -> list[dict[str, Any]]:
         return rows
     ws = wb[PITCHERS_SHEET]
     background = _read_background_from_workbook(wb)
-    # PITCHERS_LAYOUT: col 3=Player, 4=Pos, 7=Age, 20=Overall (Rating_19)
+    # PITCHERS_LAYOUT: col 3=Player, 4=Pos, 7=Age, 21=Overall (Rating_19)
     for r in range(PITCHERS_HEADER_ROW + 1, ws.max_row + 1):
         name_val = ws.cell(r, 3).value
         if name_val is None or not str(name_val).strip():
@@ -1127,7 +1399,7 @@ def _read_pitchers_from_workbook(wb: openpyxl.Workbook) -> list[dict[str, Any]]:
             "Rating_2": name,
             "Rating_3": ws.cell(r, 4).value,
             "Rating_6": ws.cell(r, 7).value,
-            "Rating_19": ws.cell(r, 20).value,
+            "Rating_19": ws.cell(r, 21).value,
             "Class": bg.get("Class", ""),
             "Signability": bg.get("Signability", ""),
         })
@@ -1145,6 +1417,8 @@ def apply_algorithm_to_workbook(path: str | Path) -> bool:
         log.warning("File not found: %s", path)
         return False
     wb = openpyxl.load_workbook(path)
+    if PITCHERS_SHEET in wb.sheetnames:
+        _migrate_pitchers_health_column(wb[PITCHERS_SHEET])
     hitters_rows = _read_hitters_from_workbook(wb)
     pitchers_rows = _read_pitchers_from_workbook(wb)
     n_hitters = len(hitters_rows)
@@ -1159,6 +1433,14 @@ def apply_algorithm_to_workbook(path: str | Path) -> bool:
         wb.close()
         return False
     _apply_algorithm_formulas(wb, algo, n_hitters, n_pitchers)
+    if PITCHERS_SHEET in wb.sheetnames:
+        _write_pitchers_headers(wb[PITCHERS_SHEET])
+    if HITTERS_SHEET in wb.sheetnames:
+        ws_h = wb[HITTERS_SHEET]
+        for col_idx, header_label, _ in HITTERS_HITTING_LAYOUT:
+            ws_h.cell(HITTERS_HEADER_ROW, col_idx, header_label)
+        for offset, header in enumerate(FIELDING_HEADERS):
+            ws_h.cell(HITTERS_HEADER_ROW, FIELDING_BLOCK_START_COL + offset, header)
     for sheet_name, header_row, n_rows in [
         (HITTERS_SHEET, HITTERS_HEADER_ROW, n_hitters),
         (PITCHERS_SHEET, PITCHERS_HEADER_ROW, n_pitchers),
@@ -1171,6 +1453,7 @@ def apply_algorithm_to_workbook(path: str | Path) -> bool:
                 if v and str(v).startswith("=") and not str(v).upper().startswith("=IFERROR"):
                     cell.value = f"=IFERROR({str(v)[1:]},0)"
     _write_master_list(wb, hitters_rows, pitchers_rows)
+    format_workbook(wb, n_hitters, n_pitchers)
     wb.save(path)
     wb.close()
     log.info("Applied algorithm and Master List to %s", path)

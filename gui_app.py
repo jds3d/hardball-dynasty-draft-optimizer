@@ -16,7 +16,6 @@ from tkinter import filedialog, messagebox, scrolledtext
 from app_dir import get_app_dir
 
 # Default paths (same as main.py)
-DEFAULT_TEMPLATE = get_app_dir() / "Season x amateur draft-template.xlsx"
 OUTPUTS_DIR = get_app_dir() / "outputs"
 
 
@@ -42,7 +41,6 @@ class QueueHandler(logging.Handler):
 
 
 def run_fetch(
-    excel_path: Path,
     output_dir: Path,
     top_n: int,
     headless: bool,
@@ -52,20 +50,19 @@ def run_fetch(
     """Run fetch in this thread. Returns (success, message)."""
     try:
         from credentials import get_headless
-        from excel_draft import validate_template
+        from excel_draft import validate_fetch_prerequisites
         from web_draft import run_sync_from_web_to_excel
 
         headless = headless or get_headless()
-        validation = validate_template(excel_path)
+        validation = validate_fetch_prerequisites()
         if validation:
-            return False, "Template validation failed:\n  " + "\n  ".join(validation)
+            return False, "Fetch prerequisites failed:\n  " + "\n  ".join(validation)
 
         if log_queue is not None:
             old_stdout = sys.stdout
             sys.stdout = io.StringIO()
         try:
             run_sync_from_web_to_excel(
-                str(excel_path),
                 headless=headless,
                 user_data_dir=user_data_dir,
                 top_n=top_n,
@@ -181,7 +178,7 @@ class DraftOptimizerApp:
         file_frame = tk.Frame(main)
         file_frame.pack(fill=tk.X, pady=(0, 4))
 
-        tk.Label(file_frame, text="Template:", font=("Segoe UI", 9), width=10, anchor="w").pack(side=tk.LEFT)
+        tk.Label(file_frame, text="Config:", font=("Segoe UI", 9), width=10, anchor="w").pack(side=tk.LEFT)
         self.lbl_template = tk.Label(file_frame, text="", font=("Segoe UI", 9), anchor="w", fg="gray")
         self.lbl_template.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -226,10 +223,11 @@ class DraftOptimizerApp:
         self.log_text.configure(state=tk.DISABLED)
 
     def _update_file_labels(self):
-        if DEFAULT_TEMPLATE.exists():
-            self.lbl_template.config(text=DEFAULT_TEMPLATE.name, fg="black")
+        algo = get_app_dir() / "algorithm.json"
+        if algo.exists():
+            self.lbl_template.config(text="algorithm.json", fg="black")
         else:
-            self.lbl_template.config(text="(none — choose before Fetch)", fg="gray")
+            self.lbl_template.config(text="(bundled algorithm.json)", fg="gray")
 
         latest = _latest_output()
         if latest:
@@ -258,17 +256,6 @@ class DraftOptimizerApp:
         return Path(excel_path)
 
     def _on_fetch(self):
-        excel_path = DEFAULT_TEMPLATE
-        if not excel_path.exists():
-            excel_path = Path(
-                filedialog.askopenfilename(
-                    title="Select Excel template",
-                    filetypes=[("Excel", "*.xlsx"), ("All files", "*.*")],
-                    initialdir=get_app_dir(),
-                )
-            )
-            if not excel_path or not Path(excel_path).exists():
-                return
         output_dir = OUTPUTS_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -277,7 +264,6 @@ class DraftOptimizerApp:
 
         def work():
             success, msg = run_fetch(
-                Path(excel_path),
                 output_dir,
                 top_n=500,
                 headless=False,

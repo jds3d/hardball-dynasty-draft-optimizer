@@ -9,5 +9,5 @@ if exist ".venv\Scripts\python.exe" set PYTHON_EXE=.venv\Scripts\python.exe
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 echo.
 echo Done. Executable: HardballDraftOptimizer.exe (same folder as this project)
-echo credentials.env, config.json, and the Excel template should already be here; see README.
+echo credentials.env and config.json should already be here; see README.
 echo outputs\ will be created next to the exe when you run Fetch.
