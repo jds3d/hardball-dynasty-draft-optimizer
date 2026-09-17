@@ -13,8 +13,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 from selenium import webdriver
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.chrome.service import Service
@@ -45,6 +47,9 @@ def _get_chrome_driver(headless: bool = False, user_data_dir: str | None = None)
         options.add_argument(f"--user-data-dir={user_data_dir}")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=options)
 
@@ -341,11 +346,7 @@ def _go_and_wait_for_table(driver: webdriver.Chrome, expected_view: str = "", ti
 
     clicked = _click_go(driver)
     if not clicked:
-        log.warning("GO not clicked; attempting JavaScript form submit as fallback...")
-        try:
-            driver.execute_script("__doPostBack('', '');")
-        except Exception:
-            pass
+        log.warning("GO not clicked; leaving current table in place instead of forcing a postback.")
 
     if old_table:
         try:
@@ -862,12 +863,196 @@ def save_rank_players_popup(driver: webdriver.Chrome) -> None:
     time.sleep(1)
 
 
+def _visible_elements(driver: webdriver.Chrome, by: str, selector: str) -> list[WebElement]:
+    found: list[WebElement] = []
+    try:
+        for el in driver.find_elements(by, selector):
+            try:
+                if el.is_displayed() and el.is_enabled():
+                    found.append(el)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return found
+
+
+def _first_visible(driver: webdriver.Chrome, selectors: list[tuple[str, str]]) -> WebElement | None:
+    for by, sel in selectors:
+        found = _visible_elements(driver, by, sel)
+        if found:
+            return found[0]
+    return None
+
+
+def _set_input_value(driver: webdriver.Chrome, el: WebElement, value: str) -> None:
+    """Fill a Clerk/React input so the controlled value actually updates."""
+    el.click()
+    time.sleep(0.15)
+    el.send_keys(Keys.CONTROL, "a")
+    el.send_keys(Keys.DELETE)
+    el.send_keys(value)
+    current = (el.get_attribute("value") or "")
+    if current != value:
+        driver.execute_script(
+            """
+            const el = arguments[0];
+            const val = arguments[1];
+            const proto = Object.getPrototypeOf(el);
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (setter) setter.call(el, val);
+            else el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            """,
+            el,
+            value,
+        )
+
+
+def _click_labeled_button(driver: webdriver.Chrome, labels: list[str]) -> bool:
+    """Click a visible button whose text matches one of the labels. Avoids Apple/Google submits."""
+    wanted = [label.strip().lower() for label in labels]
+    for el in _visible_elements(driver, By.TAG_NAME, "button"):
+        text = (el.text or el.get_attribute("value") or "").strip().lower()
+        if text in wanted or any(text.startswith(label) for label in wanted):
+            el.click()
+            return True
+    for el in _visible_elements(driver, By.CSS_SELECTOR, "input[type='submit'], input[type='button']"):
+        text = (el.get_attribute("value") or el.text or "").strip().lower()
+        if text in wanted:
+            el.click()
+            return True
+    return False
+
+
+def _login_error_text(driver: webdriver.Chrome) -> str:
+    chunks: list[str] = []
+    for sel in [
+        ".cl-formFieldErrorText",
+        ".cl-alertText",
+        ".cl-formFieldError",
+        ".cl-alert",
+    ]:
+        for el in _visible_elements(driver, By.CSS_SELECTOR, sel):
+            text = (el.text or "").strip()
+            if text and text.lower() not in {"my account | whatifsports"}:
+                chunks.append(text)
+    return " | ".join(chunks)
+
+
+def _url_parts(driver: webdriver.Chrome) -> tuple[str, str]:
+    from urllib.parse import urlparse
+    parsed = urlparse(driver.current_url or "")
+    return (parsed.netloc.lower(), parsed.path.lower())
+
+
+def _on_password_step(driver: webdriver.Chrome) -> bool:
+    _host, path = _url_parts(driver)
+    if "factor-one" in path:
+        return True
+    return _find_password_field(driver) is not None and _find_email_field(driver) is None
+
+
+def _on_clerk_authorize_page(driver: webdriver.Chrome) -> bool:
+    host, path = _url_parts(driver)
+    if "accounts.whatifsports.com" in host:
+        return False
+    return "clerk.whatifsports.com" in host or "/oauth/" in path
+
+
+def _dump_debug_page(driver: webdriver.Chrome, label: str) -> None:
+    """Write screenshot + HTML to outputs/ for debugging navigation/login failures."""
+    from pathlib import Path
+    from app_dir import get_app_dir
+    debug_dir = get_app_dir() / "outputs"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    html_path = debug_dir / f"_debug_{label}.html"
+    png_path = debug_dir / f"_debug_{label}.png"
+    try:
+        html_path.write_text(driver.page_source or "", encoding="utf-8")
+        driver.save_screenshot(str(png_path))
+        log.info("Wrote debug dump: %s and %s (url=%s)", html_path.name, png_path.name, driver.current_url)
+    except Exception as exc:
+        log.warning("Could not write debug dump '%s': %s", label, exc)
+
+
+def _on_login_page(driver: webdriver.Chrome) -> bool:
+    url = (driver.current_url or "").lower()
+    if "accounts.whatifsports.com" in url and "sign-in" in url:
+        return True
+    return _find_email_field(driver) is not None or _find_password_field(driver) is not None
+
+
+def _on_app_site(driver: webdriver.Chrome) -> bool:
+    url = (driver.current_url or "").lower()
+    if "accounts.whatifsports.com" in url or "clerk.whatifsports.com" in url:
+        return False
+    return "whatifsports.com" in url
+
+
+def _find_email_field(driver: webdriver.Chrome) -> WebElement | None:
+    return _first_visible(
+        driver,
+        [
+            (By.ID, "identifier-field"),
+            (By.CSS_SELECTOR, "input[name='identifier']"),
+            (By.CSS_SELECTOR, "input[type='email']"),
+            (By.CSS_SELECTOR, "input[placeholder*='email' i]"),
+            (By.CSS_SELECTOR, "input[name*='email']"),
+            (By.CSS_SELECTOR, "input[id*='email']"),
+            (By.CSS_SELECTOR, "input[name*='user']"),
+        ],
+    )
+
+
+def _find_password_field(driver: webdriver.Chrome) -> WebElement | None:
+    return _first_visible(
+        driver,
+        [
+            (By.ID, "password-field"),
+            (By.CSS_SELECTOR, "input[name='password']"),
+            (By.CSS_SELECTOR, "input[type='password']"),
+            (By.CSS_SELECTOR, "input[name*='pass']"),
+            (By.CSS_SELECTOR, "input[id*='pass']"),
+        ],
+    )
+
+
+def _submit_login_form(driver: webdriver.Chrome, fallback: WebElement | None) -> None:
+    if _click_labeled_button(driver, ["continue", "sign in", "log in", "login"]):
+        return
+    if fallback is not None:
+        fallback.send_keys(Keys.RETURN)
+        return
+    raise RuntimeError("Could not find a Continue / Sign in button on the login form.")
+
+
+def _complete_clerk_oauth(driver: webdriver.Chrome, timeout: float = 30) -> bool:
+    """Wait through Clerk OAuth redirects; click Continue on authorize pages if needed."""
+    deadline = time.time() + timeout
+    last_url = ""
+    while time.time() < deadline:
+        url = driver.current_url or ""
+        if url != last_url:
+            log.info("Login redirect: %s", url)
+            last_url = url
+        if _on_app_site(driver):
+            return True
+        if _find_draft_table(driver, log_found=False):
+            return True
+        if _on_clerk_authorize_page(driver):
+            _click_labeled_button(driver, ["continue", "allow", "authorize"])
+        time.sleep(0.5)
+    return _on_app_site(driver) or bool(_find_draft_table(driver, log_found=False))
+
+
 def _try_auto_login(driver: webdriver.Chrome) -> bool:
     """
-    WhatIfSports uses a two-step login: (1) email + Continue, (2) password + submit.
-    If the page shows either step, fill and proceed. Returns True if login was attempted.
+    WhatIfSports Clerk login is two-step: identifier on /sign-in, password on /sign-in/factor-one.
+    Returns True only if we reach the main WhatIfSports site.
     """
-    log.info("Checking for login form and credentials...")
+    log.info("Checking for login form and credentials... (url=%s)", driver.current_url)
     creds = None
     try:
         from credentials import get_hbd_credentials
@@ -878,99 +1063,64 @@ def _try_auto_login(driver: webdriver.Chrome) -> bool:
         log.info("No credentials found; skipping auto-login.")
         return False
     username, password = creds
-    log.info("Credentials loaded. Looking for email field...")
     try:
-        # Step 1: Find email field ("Enter your email address" / Email address label)
-        user_input = None
-        for sel in [
-            "input[type='email']",
-            "input[placeholder*='email']",
-            "input[placeholder*='Email']",
-            "input[name*='email']",
-            "input[name*='user']",
-            "input[id*='email']",
-        ]:
-            try:
-                for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                    if el.is_displayed() and el.is_enabled():
-                        user_input = el
-                        break
-                if user_input:
-                    break
-            except Exception:
-                continue
-        if not user_input:
-            log.info("No email field found; not on login step 1.")
+        try:
+            WebDriverWait(driver, 12).until(lambda d: _find_email_field(d) is not None)
+        except TimeoutException:
+            log.info("No email field found; not on login page.")
             return False
-        log.info("Step 1: Filled email, clicking Continue...")
-        user_input.clear()
-        user_input.send_keys(username)
-        # Click "Continue" (orange button) to go to password step
-        continue_clicked = False
-        for by, sel in [
-            (By.XPATH, "//button[contains(.,'Continue')]"),
-            (By.XPATH, "//*[contains(.,'Continue') and (self::button or self::input)]"),
-            (By.CSS_SELECTOR, "button[type='submit']"),
-        ]:
-            try:
-                for btn in driver.find_elements(by, sel):
-                    if "Continue" in (btn.text or "") and btn.is_displayed() and btn.is_enabled():
-                        btn.click()
-                        continue_clicked = True
-                        break
-                if continue_clicked:
-                    break
-            except Exception:
-                continue
-        if not continue_clicked:
-            from selenium.webdriver.common.keys import Keys
-            user_input.send_keys(Keys.RETURN)
-        log.info("Waiting for password step...")
-        time.sleep(2)
-        # Step 2: Password field appears after Continue
-        pass_input = None
-        for sel in ["input[type='password']", "input[name*='pass']", "input[id*='pass']"]:
-            try:
-                for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                    if el.is_displayed() and el.is_enabled():
-                        pass_input = el
-                        break
-                if pass_input:
-                    break
-            except Exception:
-                continue
+
+        user_input = _find_email_field(driver)
+        if not user_input:
+            log.info("No email field found; not on login page.")
+            return False
+
+        log.info("Step 1: filling email and clicking Continue...")
+        _set_input_value(driver, user_input, username)
+        _submit_login_form(driver, user_input)
+
+        try:
+            WebDriverWait(driver, 12).until(lambda d: _on_password_step(d) or _on_app_site(d))
+        except TimeoutException:
+            err = _login_error_text(driver)
+            _dump_debug_page(driver, "login_after_email")
+            log.warning("Password step did not appear after Continue. %s", err or "No error text.")
+            return False
+        if _on_app_site(driver):
+            log.info("Reached WhatIfSports after email step.")
+            return True
+
+        log.info("Step 2: on password page (%s); filling password...", driver.current_url)
+        try:
+            WebDriverWait(driver, 8).until(lambda d: _find_password_field(d) is not None)
+        except TimeoutException:
+            _dump_debug_page(driver, "login_password_missing")
+            log.warning("Password field missing on factor-one page.")
+            return False
+        pass_input = _find_password_field(driver)
         if not pass_input:
-            log.info("No password field found after Continue (page may still be loading).")
-            return True  # We at least submitted email; might be loading or different flow
-        log.info("Step 2: Filled password, submitting...")
-        pass_input.clear()
-        pass_input.send_keys(password)
-        # Click Sign in / Login / Submit
-        submitted = False
-        for by, sel in [
-            (By.XPATH, "//button[contains(.,'Sign in') or contains(.,'Login') or contains(.,'Log in')]"),
-            (By.XPATH, "//input[@value='Sign in' or @value='Login' or @value='Log in']"),
-            (By.CSS_SELECTOR, "button[type='submit']"),
-            (By.CSS_SELECTOR, "input[type='submit']"),
-        ]:
-            try:
-                for btn in driver.find_elements(by, sel):
-                    if btn.is_displayed() and btn.is_enabled():
-                        btn.click()
-                        submitted = True
-                        break
-                if submitted:
-                    break
-            except Exception:
-                continue
-        if not submitted:
-            from selenium.webdriver.common.keys import Keys
-            pass_input.send_keys(Keys.RETURN)
-        log.info("Login form submitted.")
-        time.sleep(2)
-        return True
+            return False
+        _set_input_value(driver, pass_input, password)
+        _submit_login_form(driver, pass_input)
+
+        err = _login_error_text(driver)
+        if err:
+            log.warning("Login form reported: %s", err)
+        log.info("Password submitted; waiting for OAuth redirect...")
+        if _complete_clerk_oauth(driver):
+            log.info("Login reached WhatIfSports (url=%s).", driver.current_url)
+            return True
+        err = _login_error_text(driver)
+        _dump_debug_page(driver, "login_after_password")
+        log.warning(
+            "Still not on WhatIfSports after password submit (url=%s). %s",
+            driver.current_url,
+            err or "",
+        )
+        return False
     except Exception as e:
         log.warning("Auto-login failed: %s", e)
+        _dump_debug_page(driver, "login_exception")
         return False
 
 
@@ -994,44 +1144,104 @@ def _click_link_or_button(driver: webdriver.Chrome, text: str) -> bool:
     return False
 
 
+def _log_visible_nav_hints(driver: webdriver.Chrome) -> None:
+    labels: list[str] = []
+    for el in driver.find_elements(By.XPATH, "//a|//button|//input[@type='submit' or @type='button' or @type='image']"):
+        try:
+            if not el.is_displayed():
+                continue
+            text = (el.text or el.get_attribute("value") or el.get_attribute("alt") or "").strip()
+            if text:
+                labels.append(text[:80])
+        except Exception:
+            continue
+    if labels:
+        log.info("Visible nav controls: %s", " | ".join(labels[:25]))
+
+
+def _enter_franchise_if_needed(driver: webdriver.Chrome) -> None:
+    """From World Center / Franchise Center, get into a team office session."""
+    url = (driver.current_url or "").lower()
+    if "franchisecenter" not in url:
+        if _click_link_or_button(driver, "View Your Franchises"):
+            log.info("Navigation: Clicked 'View Your Franchises'.")
+            time.sleep(2)
+        elif "worldselect" in url or url.rstrip("/").endswith("/hbd"):
+            log.info("Navigation: Opening Franchise Center URL...")
+            driver.get("https://www.whatifsports.com/hbd/Pages/Main/FranchiseCenter.aspx")
+            time.sleep(2)
+    if _click_link_or_button(driver, "Visit Team Office!"):
+        log.info("Navigation: Clicked 'Visit Team Office!'.")
+        time.sleep(2)
+    elif _click_link_or_button(driver, "Visit Team Office"):
+        log.info("Navigation: Clicked 'Visit Team Office'.")
+        time.sleep(2)
+
+
 def _navigate_to_draft_pool(driver: webdriver.Chrome) -> None:
     """
     After login, the site may show World Center or Franchise Center.
-    Click "View Your Franchises" then "Visit Team Office!" then load draft pool URL.
+    Enter a franchise, then load the draft pool URL.
     """
-    time.sleep(1.5)
-    # Step 1: If "View Your Franchises" is visible (World Center), click it
-    if _click_link_or_button(driver, "View Your Franchises"):
-        log.info("Navigation: Clicked 'View Your Franchises', waiting for Franchise Center...")
-        time.sleep(2)
-    # Step 2: On Franchise Center, click "Visit Team Office!" (or "Visit Team Office")
-    if _click_link_or_button(driver, "Visit Team Office!"):
-        log.info("Navigation: Clicked 'Visit Team Office!', waiting...")
-        time.sleep(2)
-    elif _click_link_or_button(driver, "Visit Team Office"):
-        log.info("Navigation: Clicked 'Visit Team Office', waiting...")
-        time.sleep(2)
-    # Step 3: Go to draft pool page
-    log.info("Navigation: Loading draft pool URL...")
-    driver.get(DRAFT_POOL_URL)
-    time.sleep(1.5)
-    try:
-        _wait(driver).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
-        log.info("Draft prospects page loaded (table found).")
-    except Exception as e:
-        log.warning("Waiting for draft table failed: %s (continuing anyway)", e)
+    time.sleep(1)
+    log.info("Post-login location: %s", driver.current_url)
+    for attempt in range(1, 4):
+        if _find_draft_table(driver, log_found=False):
+            log.info("Draft prospects table is ready.")
+            return
+        _enter_franchise_if_needed(driver)
+        if _find_draft_table(driver, log_found=False):
+            log.info("Draft prospects table is ready.")
+            return
+        log.info("Navigation: Loading draft pool URL (attempt %s/3)...", attempt)
+        driver.get(DRAFT_POOL_URL)
+        time.sleep(1.5)
+        log.info("Navigation: now at %s", driver.current_url)
+        if _find_draft_table(driver, log_found=True):
+            log.info("Draft prospects page loaded.")
+            return
+    log.warning("Draft prospects table not found after navigation.")
+    _log_visible_nav_hints(driver)
+    _dump_debug_page(driver, "draft_pool")
+    raise RuntimeError(
+        "Logged in, but could not open the amateur draft pool. "
+        "Enter your team office in the Chrome window and retry fetch."
+    )
 
 
 def _wait_for_login(driver: webdriver.Chrome) -> None:
     """Open draft pool page; auto-login if credentials are set and login form is shown, else wait for user."""
     log.info("Opening draft pool URL: %s", DRAFT_POOL_URL)
     driver.get(DRAFT_POOL_URL)
-    time.sleep(1.5)
-    if _try_auto_login(driver):
-        log.info("Auto-login completed; navigating to draft prospects page...")
-        _navigate_to_draft_pool(driver)
+    try:
+        WebDriverWait(driver, 15).until(
+            lambda d: _on_login_page(d) or _on_app_site(d) or _find_draft_table(d, log_found=False)
+        )
+    except TimeoutException:
+        log.warning("Timed out waiting for login form or app page (url=%s).", driver.current_url)
+
+    if _find_draft_table(driver, log_found=False):
+        log.info("Already on draft prospects page.")
         return
-    # Manual login: after user presses Enter, we may still be on World Center / Franchise Center
+
+    if _on_login_page(driver):
+        if _try_auto_login(driver):
+            log.info("Auto-login completed; navigating to draft prospects page...")
+        else:
+            log.info("Auto-login did not finish. Log in manually in the Chrome window (waiting up to 2 minutes)...")
+            try:
+                WebDriverWait(driver, 120).until(lambda d: _on_app_site(d))
+            except TimeoutException:
+                _dump_debug_page(driver, "login_manual_timeout")
+                raise RuntimeError(
+                    f"Still on login page after waiting for manual login (url={driver.current_url})."
+                )
+    else:
+        log.info("No login form detected (url=%s).", driver.current_url)
+
+    if not _on_app_site(driver) and not _complete_clerk_oauth(driver):
+        raise RuntimeError(f"Login did not reach WhatIfSports (url={driver.current_url}).")
+
     log.info("Checking if we need to navigate from World Center / Franchise Center...")
     _navigate_to_draft_pool(driver)
 
